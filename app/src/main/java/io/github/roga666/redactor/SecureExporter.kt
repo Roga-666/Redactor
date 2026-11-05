@@ -14,14 +14,15 @@ import kotlin.math.floor
 
 /** Output contains newly drawn pixels only; no original PDF objects, text layers or EXIF. */
 object SecureExporter {
-    fun sanitize(page: PageData, allowed: Set<String>): Bitmap {
+    fun sanitize(page: PageData, allowed: Set<String>, times: List<TimeRangeRule> = emptyList()): Bitmap {
         val src = page.bitmap
         val target = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(target)
         canvas.drawColor(Color.WHITE)
         canvas.drawBitmap(src, 0f, 0f, null)
         val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL; isAntiAlias = false }
-        for (box in page.allBoxes(allowed)) {
+        for (box in page.allBoxes(allowed, times)) {
+            // Integer snapped bounds: exclude partially transparent edge pixels.
             val r = RectF(
                 floor(box.left).coerceAtLeast(0f),
                 floor(box.top).coerceAtLeast(0f),
@@ -30,6 +31,7 @@ object SecureExporter {
             )
             if (!r.isEmpty) {
                 canvas.drawRect(r, paint)
+                // Verify center + corners of every redaction, post-pixel-replacement.
                 val xs = intArrayOf(r.left.toInt(), (r.right.toInt() - 1).coerceAtLeast(0))
                 val ys = intArrayOf(r.top.toInt(), (r.bottom.toInt() - 1).coerceAtLeast(0))
                 for (x in xs) for (y in ys) {
