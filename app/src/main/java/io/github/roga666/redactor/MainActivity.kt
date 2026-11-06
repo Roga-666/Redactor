@@ -179,7 +179,13 @@ private fun RedactorScreen() {
                         }
                         pages = loaded
                         fileName = uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.')?.take(35) ?: "document"
-                        status = "Scan complete · inspect every page"
+                        val lowerConfidenceMatches = loaded.sumOf { page ->
+                            Whitelist.allowedIndices(page.words, allowed, ranges)
+                                .count { index -> page.words[index].confidence < 0.80f }
+                        }
+                        status = if (lowerConfidenceMatches > 0)
+                            "Inspect pages · $lowerConfidenceMatches allowed matches had uncertain OCR"
+                        else "Scan complete · inspect every page"
                     } finally { scanner.close() }
                 } catch (e: Exception) {
                     pages = emptyList()
@@ -490,7 +496,7 @@ private fun RedactorScreen() {
             title = { Text("Additional text found") },
             text = {
                 Column(Modifier.heightIn(max = 340.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("The second offline scan found ${findings.size} unapproved text region(s) still visible. The file was NOT exported. These might be missed text or OCR artifacts.")
+                    Text("The second offline scan found ${findings.size} unexpected text region(s). The file was NOT exported. These can include partial words or OCR artifacts. Allowed words are checked against their original locations.")
                     findings.forEach { item ->
                         Text("Page ${item.pageIndex + 1}: ‘${item.word.content}’", fontSize = 13.sp)
                     }
