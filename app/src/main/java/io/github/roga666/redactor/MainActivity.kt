@@ -1,11 +1,13 @@
 package io.github.roga666.redactor
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -55,6 +57,11 @@ private val Back = Color(0xFF101417)
 private val Fore = Color(0xFFF2F4F5)
 private val Muted = Color(0xFF9DAEB4)
 private enum class PaintTool { COVER, ERASE }
+private data class VerificationFinding(val pageIndex: Int, val word: WordRegion)
+private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val name: String) {
+    fun dispose() = pages.forEach { if (!it.isRecycled) it.recycle() }
+}
+
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -77,6 +84,7 @@ private fun RedactorScreen() {
     val context = LocalContext.current
     val store = remember { PresetStore(context.getSharedPreferences("redactor_settings", 0)) }
     val scope = rememberCoroutineScope()
+    val appSettings = remember { context.getSharedPreferences("redactor_settings", Context.MODE_PRIVATE) }
     var presets by remember { mutableStateOf(store.load()) }
     var selectedId by remember { mutableStateOf(store.selectedId()) }
     val active = presets.firstOrNull { it.id == selectedId } ?: presets.first()
@@ -95,6 +103,11 @@ private fun RedactorScreen() {
     var showWhitelist by remember { mutableStateOf(false) }
     var showPresets by remember { mutableStateOf(false) }
     var showSecurity by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
+    var exportError by remember { mutableStateOf<String?>(null) }
+    var validationFindings by remember { mutableStateOf<List<VerificationFinding>>(emptyList()) }
+    var preparedExport by remember { mutableStateOf<PreparedExport?>(null) }
     var rangeEditIndex by remember { mutableStateOf<Int?>(null) }
     var newPresetName by remember { mutableStateOf("") }
     var renameId by remember { mutableStateOf<String?>(null) }
@@ -161,48 +174,125 @@ private fun RedactorScreen() {
         }
     }
 
-    fun export(uri: Uri, pdf: Boolean) {
-        if (!ready) { status = "Review every page before export"; return }
-        val originals = if (pdf) pages else listOf(pages[pageIndex])
-        val termSnapshot = allowed.toSet()
-        val timeSnapshot = ranges.toList()
+    fun showExportError(message: String) {
+        exportError = message
+        status = "Export failed · see full error"
+    }
+
+    suspend fun savePreparedTo(uri: Uri, prepared: PreparedExport) {
+        withContext(Dispatchers.IO) {
+            if (prepared.pdf) SecureExporter.writeImageOnlyPdf(context.contentResolver, uri, prepared.pages)
+            else SecureExporter.writePng(context.contentResolver, uri, prepared.pages.single())
+        }
+    }
+
+    fun finishExport(uri: Uri?) {
+        val pending = preparedExport ?: return
+        preparedExport = null
+        if (uri == null) {
+            pending.dispose()
+            status = "Save cancelled"
+            return
+        }
         scope.launch {
             busy = true
-            status = "Flattening and verifying offline…"
-            val output = mutableListOf<Bitmap>()
             try {
-                output += withContext(Dispatchers.Default) {
-                    originals.map { SecureExporter.sanitize(it, termSnapshot, timeSnapshot) }
-                }
-                val scanner = LocalOcr()
-                try {
-                    output.forEachIndexed { idx, bitmap ->
-                        val unexpected = scanner.findUnexpected(bitmap, originals[idx], termSnapshot, timeSnapshot)
-                        if (unexpected.isNotEmpty()) {
-                            val examples = unexpected.take(3).joinToString { "‘${it.content.take(16)}’" }
-                            error("Output page ${idx + 1} still contains unapproved text ($examples). Cover it and retry")
-                        }
-                    }
-                } finally { scanner.close() }
-                withContext(Dispatchers.IO) {
-                    if (pdf) SecureExporter.writeImageOnlyPdf(context.contentResolver, uri, output)
-                    else SecureExporter.writePng(context.contentResolver, uri, output.single())
-                }
-                status = "Export complete · ${if (pdf) "PDF" else "PNG"}"
+                savePreparedTo(uri, pending)
+                status = "Exported ${if (pending.pdf) "PDF" else "PNG"} successfully"
             } catch (e: Exception) {
-                status = "Export blocked: ${e.message ?: e.javaClass.simpleName}"
-            } finally {
-                output.forEach { if (!it.isRecycled) it.recycle() }
-                busy = false
-            }
+                showExportError("The destination could not be written: ${e.message ?: e.javaClass.simpleName}. Choose another save location and retry.")
+            } finally { pending.dispose(); busy = false }
         }
     }
 
     val pdfLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
-        if (uri != null) export(uri, true)
+        finishExport(uri)
     }
     val pngLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
-        if (uri != null) export(uri, false)
+        finishExport(uri)
+    }
+    val folderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
+        if (uri != null) {
+            try {
+                val grants = result.data?.flags ?: 0
+                val take = grants and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                require(take and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0) { "Selected folder is read-only" }
+                context.contentResolver.takePersistableUriPermission(uri, take)
+                exportFolder = uri.toString()
+                appSettings.edit().putString("export_folder_uri", uri.toString()).apply()
+                status = "Default export folder saved"
+            } catch (e: Exception) {
+                showExportError("Could not use selected folder: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    fun requestExport(pdf: Boolean) {
+        if (!ready) { status = "Review every page before export"; return }
+        val pageIndices = if (pdf) pages.indices.toList() else listOf(pageIndex)
+        val originals = pageIndices.map { pages[it] }
+        val termSnapshot = allowed.toSet()
+        val timeSnapshot = ranges.toList()
+        val name = fileName.ifBlank { "document" }.replace(Regex("[^A-Za-z0-9._-]"), "_").take(45)
+        val outputName = if (pdf) "$name-redacted.pdf" else "$name-page-${pageIndex + 1}.png"
+        scope.launch {
+            busy = true
+            validationFindings = emptyList()
+            exportError = null
+            status = "Checking flattened output…"
+            val bitmaps = mutableListOf<Bitmap>()
+            var handedOff = false
+            try {
+                bitmaps += withContext(Dispatchers.Default) {
+                    originals.map { SecureExporter.sanitize(it, termSnapshot, timeSnapshot) }
+                }
+                val scanner = LocalOcr()
+                try {
+                    val findings = mutableListOf<VerificationFinding>()
+                    bitmaps.forEachIndexed { idx, bitmap ->
+                        status = "Verifying page ${idx + 1}/${bitmaps.size}…"
+                        scanner.findUnexpected(bitmap, originals[idx], termSnapshot, timeSnapshot).forEach {
+                            findings += VerificationFinding(pageIndices[idx], it)
+                        }
+                    }
+                    if (findings.isNotEmpty()) {
+                        validationFindings = findings
+                        status = "Found ${findings.size} areas to review"
+                        return@launch
+                    }
+                } finally { scanner.close() }
+
+                val pending = PreparedExport(bitmaps.toList(), pdf, outputName)
+                val treeUri = exportFolder?.let(Uri::parse)
+                if (treeUri != null) {
+                    status = "Saving to default folder…"
+                    val tree = DocumentFile.fromTreeUri(context, treeUri)
+                        ?: error("Default folder is unavailable. Choose it again in Settings.")
+                    if (!tree.canWrite()) error("Default folder is read-only. Choose another folder in Settings.")
+                    val document = tree.createFile(if (pdf) "application/pdf" else "image/png", outputName)
+                        ?: error("Could not create a file in the default folder")
+                    try {
+                        savePreparedTo(document.uri, pending)
+                    } catch (e: Exception) {
+                        // Never leave an incomplete or partially written export in the selected folder.
+                        document.delete()
+                        throw e
+                    }
+                    status = "Saved: ${document.name ?: outputName}"
+                } else {
+                    preparedExport?.dispose()
+                    preparedExport = pending
+                    handedOff = true
+                    if (pdf) pdfLauncher.launch(outputName) else pngLauncher.launch(outputName)
+                }
+            } catch (e: Exception) {
+                showExportError("Export could not finish: ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                if (!handedOff) bitmaps.forEach { if (!it.isRecycled) it.recycle() }
+                busy = false
+            }
+        }
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Back) {
@@ -214,6 +304,8 @@ private fun RedactorScreen() {
                 Text("Redactor", fontSize = 23.sp, fontWeight = FontWeight.Bold)
                 Text("OFFLINE", color = Accent, fontSize = 10.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
+                TextButton(onClick = { showSettings = true }, enabled = !busy,
+                    contentPadding = PaddingValues(horizontal = 8.dp)) { Text("⚙", fontSize = 23.sp) }
                 Button(
                     onClick = {
                         importLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -237,7 +329,10 @@ private fun RedactorScreen() {
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().height(22.dp)) {
                 if (busy) CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                Text(status, modifier = Modifier.padding(start = if (busy) 7.dp else 0.dp), fontSize = 12.sp,
+                Text(status, modifier = Modifier.weight(1f).padding(start = if (busy) 7.dp else 0.dp)
+                    .clickable(enabled = exportError != null || validationFindings.isNotEmpty()) {
+                        if (exportError == null) status = "Review the flagged areas below"
+                    }, fontSize = 12.sp,
                     color = if (status.contains("failed", true) || status.contains("blocked", true)) Color(0xFFFFA4A4) else Muted,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -251,7 +346,12 @@ private fun RedactorScreen() {
                     RedactionPreview(
                         page = page, allowed = allowed, times = ranges, masksVisible = showMasks, tool = tool,
                         modifier = Modifier.fillMaxSize(),
-                        onCover = { rect -> editCurrentPage { it.copy(manualBoxes = it.manualBoxes + rect) } },
+                        onCover = { points ->
+                            val before = pages[pageIndex]
+                            val after = before.coverAt(points)
+                            if (after == before) status = "No OCR word here · drag to cover a missed area"
+                            else editCurrentPage { after }
+                        },
                         onErase = { points -> editCurrentPage { it.eraseAt(points, allowed, ranges) } }
                     )
                 } else {
@@ -294,12 +394,98 @@ private fun RedactorScreen() {
                 ) { Text(if (pageIndex in reviewed) "✓ Reviewed" else "Review ✓") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { pdfLauncher.launch("${fileName.ifBlank { "document" }}-redacted.pdf") },
+                Button(onClick = { requestExport(true) },
                     enabled = ready, modifier = Modifier.weight(1f)) { Text("Export PDF") }
-                Button(onClick = { pngLauncher.launch("${fileName.ifBlank { "document" }}-page-${pageIndex + 1}.png") },
+                Button(onClick = { requestExport(false) },
                     enabled = ready, modifier = Modifier.weight(1f)) { Text("Export PNG") }
             }
         }
+    }
+
+    if (showSettings) {
+        ModalBottomSheet(onDismissRequest = { showSettings = false }) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("Default export folder", fontWeight = FontWeight.SemiBold)
+                Text(
+                    exportFolder?.let { DocumentFile.fromTreeUri(context, Uri.parse(it))?.name ?: "Previously chosen folder" }
+                        ?: "Ask where to save each export",
+                    color = Muted, fontSize = 13.sp
+                )
+                Button(onClick = {
+                    folderLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                        putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+                    })
+                }, modifier = Modifier.fillMaxWidth()) { Text("Choose folder") }
+                if (exportFolder != null) {
+                    OutlinedButton(onClick = {
+                        exportFolder = null
+                        appSettings.edit().remove("export_folder_uri").apply()
+                        status = "Save location reset to Ask every time"
+                    }, modifier = Modifier.fillMaxWidth()) { Text("Ask every time instead") }
+                }
+                Text("Choose a folder on this device to keep exports local. Some external document providers may sync files to the cloud.",
+                    color = Muted, fontSize = 12.sp)
+                TextButton(onClick = { showSecurity = !showSecurity }) {
+                    Text(if (showSecurity) "Privacy & limitations ▴" else "Privacy & limitations ▾")
+                }
+                if (showSecurity) {
+                    Text("Redactor has no internet permission. Exported files contain new flattened pixels, but OCR can miss text. Always inspect outputs before sharing. Original files remain untouched.",
+                        color = Muted, fontSize = 12.sp)
+                }
+                Button(onClick = { showSettings = false }, modifier = Modifier.fillMaxWidth()) { Text("Done") }
+                Spacer(Modifier.height(14.dp))
+            }
+        }
+    }
+
+    if (validationFindings.isNotEmpty()) {
+        val findings = validationFindings
+        AlertDialog(
+            onDismissRequest = { validationFindings = emptyList() },
+            title = { Text("Additional text found") },
+            text = {
+                Column(Modifier.heightIn(max = 340.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("The second offline scan found ${findings.size} unapproved text region(s) still visible. The file was NOT exported. These might be missed text or OCR artifacts.")
+                    findings.forEach { item ->
+                        Text("Page ${item.pageIndex + 1}: ‘${item.word.content}’", fontSize = 13.sp)
+                    }
+                    Text("Cover all highlighted regions, review affected pages again, then export. You can also dismiss and cover them manually.", color = Muted, fontSize = 12.sp)
+                }
+            },
+            confirmButton = { TextButton(onClick = {
+                val updated = pages.toMutableList()
+                findings.groupBy { it.pageIndex }.forEach { (index, perPage) ->
+                    val original = updated[index]
+                    val added = perPage.map { result ->
+                        val b = result.word.bounds
+                        val margin = maxOf(6f, b.height() * 0.25f)
+                        RectF((b.left - margin).coerceAtLeast(0f), (b.top - margin).coerceAtLeast(0f),
+                            (b.right + margin).coerceAtMost(original.bitmap.width.toFloat()),
+                            (b.bottom + margin).coerceAtMost(original.bitmap.height.toFloat()))
+                    }
+                    updated[index] = original.copy(manualBoxes = original.manualBoxes + added)
+                }
+                pages = updated
+                reviewed = reviewed - findings.map { it.pageIndex }.toSet()
+                pageIndex = findings.first().pageIndex
+                undoPage = null
+                showMasks = true
+                validationFindings = emptyList()
+                status = "Added ${findings.size} covers · review affected pages again"
+            }) { Text("Cover found text") } },
+            dismissButton = { TextButton(onClick = { validationFindings = emptyList() }) { Text("Review myself") } }
+        )
+    }
+
+    if (exportError != null) {
+        AlertDialog(onDismissRequest = { exportError = null },
+            title = { Text("Export error") },
+            text = { Text(exportError.orEmpty(), modifier = Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) },
+            confirmButton = { TextButton(onClick = { exportError = null }) { Text("OK") } })
     }
 
     if (showWhitelist) {
@@ -493,7 +679,7 @@ private fun RedactionPreview(
     masksVisible: Boolean,
     tool: PaintTool,
     modifier: Modifier,
-    onCover: (RectF) -> Unit,
+    onCover: (List<PointF>) -> Unit,
     onErase: (List<PointF>) -> Unit
 ) {
     val bitmap = page.bitmap
@@ -508,12 +694,11 @@ private fun RedactionPreview(
     Canvas(
         modifier = modifier.clip(RoundedCornerShape(12.dp))
             .pointerInput(tool, bitmap) {
-                if (tool == PaintTool.ERASE) {
-                    detectTapGestures(onTap = { point ->
-                        val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                        currentErase(listOf(v.toSource(point, bitmap.width, bitmap.height)))
-                    })
-                }
+                detectTapGestures(onTap = { point ->
+                    val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
+                    val source = listOf(v.toSource(point, bitmap.width, bitmap.height))
+                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
+                })
             }
             .pointerInput(tool, bitmap) {
                 detectDragGestures(
@@ -528,15 +713,8 @@ private fun RedactionPreview(
                         val last = current
                         if (first != null && last != null) {
                             val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                            if (tool == PaintTool.COVER) {
-                                val a = v.toSource(first, bitmap.width, bitmap.height)
-                                val b = v.toSource(last, bitmap.width, bitmap.height)
-                                if (abs(a.x - b.x) >= 5f && abs(a.y - b.y) >= 5f) {
-                                    currentCover(RectF(minOf(a.x, b.x), minOf(a.y, b.y), maxOf(a.x, b.x), maxOf(a.y, b.y)))
-                                }
-                            } else {
-                                currentErase(stroke.map { v.toSource(it, bitmap.width, bitmap.height) })
-                            }
+                            val trace = stroke.map { v.toSource(it, bitmap.width, bitmap.height) }
+                            if (tool == PaintTool.COVER) currentCover(trace) else currentErase(trace)
                         }
                         started = null; current = null; stroke = emptyList()
                     },
@@ -559,8 +737,7 @@ private fun RedactionPreview(
         }
         if (started != null && current != null) {
             if (tool == PaintTool.COVER) {
-                drawRect(Color(0xFFFFC773), topLeft = Offset(minOf(started!!.x, current!!.x), minOf(started!!.y, current!!.y)),
-                    size = Size(abs(started!!.x - current!!.x), abs(started!!.y - current!!.y)), style = Stroke(3f))
+                stroke.forEach { drawCircle(Color(0xFFFFC773).copy(alpha = 0.65f), radius = 5f, center = it) }
             } else {
                 stroke.forEach { drawCircle(Accent.copy(alpha = 0.55f), radius = 7f, center = it) }
             }
