@@ -16,10 +16,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +35,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -46,6 +48,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -101,7 +104,7 @@ private fun RedactorScreen() {
     var pages by remember { mutableStateOf<List<PageData>>(emptyList()) }
     var pageIndex by remember { mutableIntStateOf(0) }
     var reviewed by remember { mutableStateOf<Set<Int>>(emptySet()) }
-    var undoPage by remember { mutableStateOf<Pair<Int, PageData>?>(null) }
+    var undoHistory by remember { mutableStateOf(UndoHistory<PageData>()) }
     var tool by remember { mutableStateOf(PaintTool.COVER) }
     var showMasks by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -135,7 +138,7 @@ private fun RedactorScreen() {
         store.save(next, id)
         if (invalidate) {
             reviewed = emptySet()
-            undoPage = null
+            undoHistory = UndoHistory()
             pages = pages.map { it.copy(revealedWordIndices = emptySet()) }
         }
     }
@@ -149,7 +152,7 @@ private fun RedactorScreen() {
         val before = pages[pageIndex]
         val after = change(before)
         if (before == after) return
-        undoPage = pageIndex to before
+        undoHistory = undoHistory.record(pageIndex, before)
         pages = pages.toMutableList().apply { this[pageIndex] = after }
         reviewed = reviewed - pageIndex
         showMasks = true
@@ -165,7 +168,7 @@ private fun RedactorScreen() {
                 status = "Scanning locally…"
                 pages = emptyList()
                 reviewed = emptySet()
-                undoPage = null
+                undoHistory = UndoHistory()
                 pageIndex = 0
                 showMasks = true
                 try {
@@ -391,19 +394,25 @@ private fun RedactorScreen() {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                FilterChip(selected = tool == PaintTool.COVER, onClick = { tool = PaintTool.COVER }, enabled = !busy,
-                    label = { Text("✎ Cover") })
-                FilterChip(selected = tool == PaintTool.ERASE, onClick = { tool = PaintTool.ERASE }, enabled = !busy,
-                    label = { Text("⌫ Erase") })
+                RedactionToolButton("Redact", PaintTool.COVER, tool == PaintTool.COVER, !busy) {
+                    tool = PaintTool.COVER
+                }
+                RedactionToolButton("Erase", PaintTool.ERASE, tool == PaintTool.ERASE, !busy) {
+                    tool = PaintTool.ERASE
+                }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = {
-                    val state = undoPage
-                    if (state != null && state.first == pageIndex && !busy) {
-                        pages = pages.toMutableList().apply { this[pageIndex] = state.second }
+                    val undo = undoHistory.takeLastFor(pageIndex)
+                    if (undo != null && !busy) {
+                        pages = pages.toMutableList().apply { this[pageIndex] = undo.first }
                         reviewed = reviewed - pageIndex
-                        undoPage = null
+                        undoHistory = undo.second
+                        showMasks = true
+                        status = "Undid last edit · review page again"
                     }
-                }, enabled = undoPage?.first == pageIndex && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) { Text("Undo") }
+                }, enabled = undoHistory.canUndo(pageIndex) && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) {
+                    Text("Undo")
+                }
                 TextButton(onClick = { showMasks = !showMasks }, enabled = pages.isNotEmpty() && !busy,
                     contentPadding = PaddingValues(horizontal = 4.dp)) { Text(if (showMasks) "Original" else "Masked") }
             }
@@ -519,7 +528,7 @@ private fun RedactorScreen() {
                 pages = updated
                 reviewed = reviewed - findings.map { it.pageIndex }.toSet()
                 pageIndex = findings.first().pageIndex
-                undoPage = null
+                undoHistory = UndoHistory()
                 showMasks = true
                 validationFindings = emptyList()
                 status = "Added ${findings.size} covers · review affected pages again"
