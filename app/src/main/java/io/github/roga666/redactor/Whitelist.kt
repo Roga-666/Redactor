@@ -53,44 +53,65 @@ object Whitelist {
     fun mayShow(ocrText: String, confidence: Float, allowed: Set<String>): Boolean =
         normalize(ocrText).let { it.isNotEmpty() && confidence.isFinite() && confidence >= 0.80f && it in allowed }
 
-    /** Return only word positions covered by an exact allowed term/phrase or allowed time. */
+    /**
+     * OCR may segment a small label ("EP CL") as one element, two elements,
+     * or "EP/CL". Only entire, explicitly allowed tokens/phrases can qualify;
+     * substring matches (EP inside EPN) are deliberately forbidden.
+     */
+    private fun tokens(text: String): List<String> =
+        Normalizer.normalize(text, Normalizer.Form.NFKC)
+            .lowercase(Locale.ROOT)
+            .split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter(String::isNotBlank)
+
+    /** Return OCR word indices approved by a complete whitelist phrase or time. */
     fun allowedIndices(words: List<WordRegion>, terms: Set<String>, ranges: List<TimeRangeRule>): Set<Int> {
         val result = mutableSetOf<Int>()
         val normalized = words.map { normalize(it.content) }
-        // An exact user-whitelisted OCR match is permission to show that word.
-        // A weak confidence score is a reason for visual review, not an override
-        // that silently blacks out an explicitly allowed value.
-        // Unavailable or non-finite scores remain ineligible for automatic approval.
+        val allowedPhrases = terms.map { tokens(it).joinToString(" ") }.filter(String::isNotBlank).toSet()
         fun recognized(i: Int): Boolean = words[i].confidence.isFinite() && words[i].confidence >= 0f
 
-        // Standalone terms never implicitly allow AM or PM just because a time-range is enabled.
         for (i in words.indices) {
-            if (recognized(i) && normalized[i].isNotEmpty() && normalized[i] in terms) result += i
-            val followingPeriod = i + 1 < words.size && words[i].lineIndex == words[i + 1].lineIndex &&
+            if (!recognized(i)) continue
+            val wordTokens = tokens(words[i].content)
+            val canonical = wordTokens.joinToString(" ")
+            // OCR can include whitespace or punctuation within one bounding box.
+            // Require every resulting component to be allowed if no phrase matches.
+            if (canonical.isNotEmpty() &&
+                (canonical in allowedPhrases || (wordTokens.size > 1 && wordTokens.all { it in allowedPhrases }))
+            ) result += i
+
+            val followingPeriod = i + 1 < words.size &&
+                words[i].lineIndex == words[i + 1].lineIndex &&
                 normalized[i + 1] in setOf("am", "pm")
-            if (!followingPeriod && recognized(i) && ranges.any { it.matches(words[i].content) }) result += i
-            if (followingPeriod && recognized(i) && recognized(i + 1) &&
-                ranges.any { it.matches(words[i].content + " " + words[i + 1].content) }
-            ) {
+            if (!followingPeriod && ranges.any { it.matches(words[i].content) }) result += i
+            if (followingPeriod && recognized(i + 1) &&
+                ranges.any { it.matches(words[i].content + " " + words[i + 1].content) }) {
                 result += i
                 result += i + 1
             }
         }
 
-        // Permit exact multi-word entries only when all OCR components appear consecutively on one line.
-        for (term in terms) {
-            val components = term.split(Regex("\\s+")).filter(String::isNotBlank)
-            if (components.size < 2) continue
-            for (start in 0..(words.size - components.size).coerceAtLeast(-1)) {
-                if (components.indices.all { delta ->
-                        val i = start + delta
-                        recognized(i) && normalized[i] == components[delta] &&
-                            words[i].lineIndex == words[start].lineIndex
-                    }) {
-                    components.indices.forEach { result += start + it }
+        // OCR can also split a phrase into multiple elements. Match consecutive
+        // elements on the same original line, never a random substring.
+        val maxTokens = allowedPhrases.maxOfOrNull { it.split(' ').size }?.coerceAtMost(12) ?: 0
+        if (maxTokens > 1) {
+            for (start in words.indices) {
+                if (!recognized(start)) continue
+                val parts = mutableListOf<String>()
+                val indices = mutableListOf<Int>()
+                for (end in start until minOf(words.size, start + 12)) {
+                    if (!recognized(end) || words[end].lineIndex != words[start].lineIndex) break
+                    val currentTokens = tokens(words[end].content)
+                    if (currentTokens.isEmpty()) break
+                    parts.addAll(currentTokens)
+                    if (parts.size > maxTokens) break
+                    indices += end
+                    if (parts.size > 1 && parts.joinToString(" ") in allowedPhrases) result.addAll(indices)
                 }
             }
         }
         return result
     }
+
 }
