@@ -57,15 +57,19 @@ object Whitelist {
     fun allowedIndices(words: List<WordRegion>, terms: Set<String>, ranges: List<TimeRangeRule>): Set<Int> {
         val result = mutableSetOf<Int>()
         val normalized = words.map { normalize(it.content) }
-        fun trustworthy(i: Int): Boolean = words[i].confidence.isFinite() && words[i].confidence >= 0.80f
+        // An exact user-whitelisted OCR match is permission to show that word.
+        // A weak confidence score is a reason for visual review, not an override
+        // that silently blacks out an explicitly allowed value.
+        // Unavailable or non-finite scores remain ineligible for automatic approval.
+        fun recognized(i: Int): Boolean = words[i].confidence.isFinite() && words[i].confidence >= 0f
 
         // Standalone terms never implicitly allow AM or PM just because a time-range is enabled.
         for (i in words.indices) {
-            if (trustworthy(i) && normalized[i].isNotEmpty() && normalized[i] in terms) result += i
+            if (recognized(i) && normalized[i].isNotEmpty() && normalized[i] in terms) result += i
             val followingPeriod = i + 1 < words.size && words[i].lineIndex == words[i + 1].lineIndex &&
                 normalized[i + 1] in setOf("am", "pm")
-            if (!followingPeriod && trustworthy(i) && ranges.any { it.matches(words[i].content) }) result += i
-            if (followingPeriod && trustworthy(i) && trustworthy(i + 1) &&
+            if (!followingPeriod && recognized(i) && ranges.any { it.matches(words[i].content) }) result += i
+            if (followingPeriod && recognized(i) && recognized(i + 1) &&
                 ranges.any { it.matches(words[i].content + " " + words[i + 1].content) }
             ) {
                 result += i
@@ -80,7 +84,7 @@ object Whitelist {
             for (start in 0..(words.size - components.size).coerceAtLeast(-1)) {
                 if (components.indices.all { delta ->
                         val i = start + delta
-                        trustworthy(i) && normalized[i] == components[delta] &&
+                        recognized(i) && normalized[i] == components[delta] &&
                             words[i].lineIndex == words[start].lineIndex
                     }) {
                     components.indices.forEach { result += start + it }
