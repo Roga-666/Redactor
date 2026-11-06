@@ -570,8 +570,10 @@ private fun RedactorScreen() {
             },
             confirmButton = { TextButton(onClick = {
                 val updated = pages.toMutableList()
+                var nextHistory = undoHistory
                 findings.groupBy { it.pageIndex }.forEach { (index, perPage) ->
                     val original = updated[index]
+                    nextHistory = nextHistory.record(index, original)
                     val added = perPage.map { result ->
                         val b = result.word.bounds
                         val margin = maxOf(6f, b.height() * 0.25f)
@@ -584,7 +586,7 @@ private fun RedactorScreen() {
                 pages = updated
                 reviewed = reviewed - findings.map { it.pageIndex }.toSet()
                 pageIndex = findings.first().pageIndex
-                undoHistory = UndoHistory()
+                undoHistory = nextHistory
                 showMasks = true
                 validationFindings = emptyList()
                 status = "Added ${findings.size} covers · review affected pages again"
