@@ -82,3 +82,11 @@ The main document editor has a fixed-height layout: importing, switching presets
 - **Privacy note:** moved into a collapsed Privacy & safety disclosure in the Allowed editor.
 
 Profiles and whitelist rules are saved in private app preferences. No network permission is requested. Debug APKs built by GitHub Actions are not release-signed, independently security audited, or guaranteed to protect against OCR misses.
+
+## v0.3.0: Smart Cover, detailed export review and default folder
+
+- **Smart Cover:** tap a detected word to cover that whole OCR region; scribble across several words to cover all touched regions. Longer drags with no OCR matches use a manual area mask for missed words. Erase continues to remove only selected masks. Undo restores the previous page state.
+- **Export review:** before opening the save picker or writing to the default folder, sanitize the image and run a second offline OCR pass. If unexpected words are seen, show their full text and page numbers in a scrollable dialog. Tap **Cover found text** to add all corresponding masks, then manually re-review the affected pages and export again. Export is not claimed successful while validation is blocked.
+- **Settings (⚙):** choose a default export directory through Android's Storage Access Framework; Redactor retains the selected directory permission and writes new PNG/PDF files directly there. Use **Ask every time instead** to restore the regular Save As picker. Not all folder providers are local—select an on-device directory to avoid cloud sync.
+- **Preserved security design:** no Internet permission, bundled OCR, flattened output. A successful OCR recheck is not an absolute proof of no sensitive information; human inspection remains essential.
+- **Build:** GitHub Actions compiles `app-debug.apk` under the latest Android APK workflow. An Android 11+ picker may refuse selecting root Downloads or root of shared storage; create a dedicated subfolder in Documents instead.
