@@ -62,7 +62,7 @@ private val Fore = Color(0xFFF2F4F5)
 private val Muted = Color(0xFF9DAEB4)
 private enum class PaintTool { COVER, ERASE }
 private data class VerificationFinding(val pageIndex: Int, val word: WordRegion)
-private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val name: String) {
+private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val name: String, val ocrWarnings: Int = 0) {
     fun dispose() = pages.forEach { if (!it.isRecycled) it.recycle() }
 }
 
@@ -117,6 +117,11 @@ private fun RedactorScreen() {
     var showSettings by remember { mutableStateOf(false) }
     var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
     var allowScreenshots by remember { mutableStateOf(appSettings.getBoolean("allow_screenshots", false)) }
+    // Opt-in only: still run the second OCR scan, but don't let warnings block the
+    // already-flattened export. The page-by-page review requirement is unchanged.
+    var allowExportWithOcrWarnings by remember {
+        mutableStateOf(appSettings.getBoolean("allow_export_with_ocr_warnings", false))
+    }
     // Changing the toggle takes effect immediately, without restarting the activity.
     SideEffect {
         (context as? Activity)?.window?.let { window ->
@@ -223,8 +228,16 @@ private fun RedactorScreen() {
             busy = true
             try {
                 savePreparedTo(uri, pending)
-                status = "Exported ${if (pending.pdf) "PDF" else "PNG"} successfully"
-                Toast.makeText(context, "Saved successfully", Toast.LENGTH_SHORT).show()
+                status = if (pending.ocrWarnings > 0)
+                    "Saved with ${pending.ocrWarnings} OCR warning(s) · inspect output before sharing"
+                else "Exported ${if (pending.pdf) "PDF" else "PNG"} successfully"
+                Toast.makeText(
+                    context,
+                    if (pending.ocrWarnings > 0)
+                        "Saved with ${pending.ocrWarnings} OCR warnings. Review before sharing."
+                    else "Saved successfully",
+                    if (pending.ocrWarnings > 0) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
+                ).show()
             } catch (e: Exception) {
                 showExportError("The destination could not be written: ${e.message ?: e.javaClass.simpleName}. Choose another save location and retry.")
             } finally { pending.dispose(); busy = false }
@@ -316,6 +329,7 @@ private fun RedactorScreen() {
         val originals = pageIndices.map { pages[it] }
         val termSnapshot = allowed.toSet()
         val timeSnapshot = ranges.toList()
+        val overrideWarningsSnapshot = allowExportWithOcrWarnings
         val name = fileName.ifBlank { "document" }.replace(Regex("[^A-Za-z0-9._-]"), "_").take(45)
         val outputName = if (pdf) "$name-redacted.pdf" else "$name-page-${pageIndex + 1}.png"
         scope.launch {
@@ -325,6 +339,7 @@ private fun RedactorScreen() {
             status = "Checking flattened output…"
             val bitmaps = mutableListOf<Bitmap>()
             var handedOff = false
+            var warningCount = 0
             try {
                 bitmaps += withContext(Dispatchers.Default) {
                     originals.map { SecureExporter.sanitize(it, termSnapshot, timeSnapshot) }
@@ -338,14 +353,20 @@ private fun RedactorScreen() {
                             findings += VerificationFinding(pageIndices[idx], it)
                         }
                     }
-                    if (findings.isNotEmpty()) {
+                    warningCount = findings.size
+                    if (!OcrExportPolicy.canExport(warningCount, overrideWarningsSnapshot)) {
                         validationFindings = findings
                         status = "Found ${findings.size} areas to review"
                         return@launch
                     }
+                    if (warningCount > 0) {
+                        // The user explicitly enabled an unsafe override.
+                        // We never skip flattening or the pre-export review requirement.
+                        status = "OCR warned about $warningCount region(s) · exporting by request"
+                    }
                 } finally { scanner.close() }
 
-                val pending = PreparedExport(bitmaps.toList(), pdf, outputName)
+                val pending = PreparedExport(bitmaps.toList(), pdf, outputName, warningCount)
                 val treeUri = exportFolder?.let(Uri::parse)
                 if (treeUri != null) {
                     // A persisted folder is an automatic destination: never launch CreateDocument.
@@ -365,8 +386,15 @@ private fun RedactorScreen() {
                             throw e
                         }
                     }
-                    status = "Saved automatically: $saved"
-                    Toast.makeText(context, "Saved: $saved", Toast.LENGTH_SHORT).show()
+                    status = if (warningCount > 0)
+                        "Saved $saved with $warningCount OCR warning(s) · inspect before sharing"
+                    else "Saved automatically: $saved"
+                    Toast.makeText(
+                        context,
+                        if (warningCount > 0) "Saved with $warningCount OCR warnings. Review before sharing."
+                        else "Saved: $saved",
+                        if (warningCount > 0) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
+                    ).show()
                 } else {
                     // Only users without a default folder see the filename/location picker.
                     preparedExport?.dispose()
@@ -515,6 +543,31 @@ private fun RedactorScreen() {
                 if (allowScreenshots) {
                     Text("Screenshots may include unredacted documents or visible information. Turn this off when finished.",
                         color = Color(0xFFFFC6A5), fontSize = 12.sp)
+                }
+                HorizontalDivider()
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Allow export with OCR warnings", fontWeight = FontWeight.SemiBold)
+                        Text("Off by default. Save even if the final scan detects unexpected text.",
+                            color = Muted, fontSize = 12.sp)
+                    }
+                    Switch(
+                        checked = allowExportWithOcrWarnings,
+                        enabled = !busy,
+                        onCheckedChange = { enabled ->
+                            allowExportWithOcrWarnings = enabled
+                            appSettings.edit().putBoolean("allow_export_with_ocr_warnings", enabled).apply()
+                        }
+                    )
+                }
+                if (allowExportWithOcrWarnings) {
+                    Text(
+                        "WARNING: Exported files may contain unapproved or sensitive text. " +
+                            "The OCR scan still runs, but its findings will not block saving. " +
+                            "Inspect every page and the saved file before sharing.",
+                        color = Color(0xFFFFC6A5),
+                        fontSize = 12.sp
+                    )
                 }
                 HorizontalDivider()
                 Text("Default export folder", fontWeight = FontWeight.SemiBold)

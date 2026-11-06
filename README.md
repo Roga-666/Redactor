@@ -136,3 +136,17 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
 - Exact OCR recognition of short labels is inherently imperfect: inspect
   **every** page, particularly eraser-revealed regions, before export. Do not
   treat builds without on-device verification as certified for sensitive data.
+
+## v0.7.0 — Optional export with unresolved OCR findings
+
+- **Settings → Allow export with OCR warnings** defaults **off**. With it off,
+  export is blocked when the second offline OCR scan finds unexpected words.
+- Enabling it explicitly permits export **despite** findings from that scan,
+  with a prominent warning in Settings and a warning count on saved files.
+- The scan still runs and its warning count is shown. Redaction pixels are still
+  permanently replaced in a freshly flattened PNG or image-only PDF.
+- **All document pages must still be marked Reviewed**. This is not a way to
+  export unreviewed documents or restore covered pixels.
+- The option is intended for known OCR false positives only. If the scan is
+  correct, the saved document may visibly expose sensitive/unapproved text.
+  Inspect the saved output before sharing. The app is experimental.
