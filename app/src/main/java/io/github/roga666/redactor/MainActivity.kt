@@ -10,6 +10,7 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import android.os.Bundle
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -66,7 +67,13 @@ private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // Keep sensitive pages protected unless the user explicitly opts into screenshots.
+        val screenshotPreference = getSharedPreferences("redactor_settings", Context.MODE_PRIVATE)
+        if (!screenshotPreference.getBoolean("allow_screenshots", false)) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
         setContent {
             MaterialTheme(
                 colorScheme = darkColorScheme(
@@ -105,6 +112,14 @@ private fun RedactorScreen() {
     var showSecurity by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
+    var allowScreenshots by remember { mutableStateOf(appSettings.getBoolean("allow_screenshots", false)) }
+    // Changing the toggle takes effect immediately, without restarting the activity.
+    SideEffect {
+        (context as? Activity)?.window?.let { window ->
+            if (allowScreenshots) window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            else window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
     var exportError by remember { mutableStateOf<String?>(null) }
     var validationFindings by remember { mutableStateOf<List<VerificationFinding>>(emptyList()) }
     var preparedExport by remember { mutableStateOf<PreparedExport?>(null) }
@@ -199,6 +214,7 @@ private fun RedactorScreen() {
             try {
                 savePreparedTo(uri, pending)
                 status = "Exported ${if (pending.pdf) "PDF" else "PNG"} successfully"
+                Toast.makeText(context, "Saved successfully", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 showExportError("The destination could not be written: ${e.message ?: e.javaClass.simpleName}. Choose another save location and retry.")
             } finally { pending.dispose(); busy = false }
@@ -266,21 +282,27 @@ private fun RedactorScreen() {
                 val pending = PreparedExport(bitmaps.toList(), pdf, outputName)
                 val treeUri = exportFolder?.let(Uri::parse)
                 if (treeUri != null) {
-                    status = "Saving to default folder…"
-                    val tree = DocumentFile.fromTreeUri(context, treeUri)
-                        ?: error("Default folder is unavailable. Choose it again in Settings.")
-                    if (!tree.canWrite()) error("Default folder is read-only. Choose another folder in Settings.")
-                    val document = tree.createFile(if (pdf) "application/pdf" else "image/png", outputName)
-                        ?: error("Could not create a file in the default folder")
-                    try {
-                        savePreparedTo(document.uri, pending)
-                    } catch (e: Exception) {
-                        // Never leave an incomplete or partially written export in the selected folder.
-                        document.delete()
-                        throw e
+                    // A persisted folder is an automatic destination: never launch CreateDocument.
+                    status = "Saving directly to default folder…"
+                    val saved = withContext(Dispatchers.IO) {
+                        val tree = DocumentFile.fromTreeUri(context, treeUri)
+                            ?: error("Default folder is unavailable. Choose it again in Settings.")
+                        if (!tree.canWrite()) error("Default folder is read-only. Choose another folder in Settings.")
+                        val document = tree.createFile(if (pdf) "application/pdf" else "image/png", outputName)
+                            ?: error("Could not create a file in the default folder")
+                        try {
+                            savePreparedTo(document.uri, pending)
+                            document.name ?: outputName
+                        } catch (e: Exception) {
+                            // Delete incomplete output rather than leaving a misleading partial export.
+                            document.delete()
+                            throw e
+                        }
                     }
-                    status = "Saved: ${document.name ?: outputName}"
+                    status = "Saved automatically: $saved"
+                    Toast.makeText(context, "Saved: $saved", Toast.LENGTH_SHORT).show()
                 } else {
+                    // Only users without a default folder see the filename/location picker.
                     preparedExport?.dispose()
                     preparedExport = pending
                     handedOff = true
@@ -391,7 +413,7 @@ private fun RedactorScreen() {
                     enabled = pages.isNotEmpty() && !busy,
                     colors = ButtonDefaults.buttonColors(containerColor = if (pageIndex in reviewed) Color(0xFF315B4F) else Accent),
                     contentPadding = PaddingValues(horizontal = 12.dp)
-                ) { Text(if (pageIndex in reviewed) "✓ Reviewed" else "Review ✓") }
+                ) { Text(if (pageIndex in reviewed) "Reviewed" else "Review") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = { requestExport(true) },
@@ -407,12 +429,31 @@ private fun RedactorScreen() {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Settings", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Allow screenshots", fontWeight = FontWeight.SemiBold)
+                        Text("Off by default. Allow screenshots and screen recordings of Redactor.",
+                            color = Muted, fontSize = 12.sp)
+                    }
+                    Switch(checked = allowScreenshots, onCheckedChange = { enabled ->
+                        allowScreenshots = enabled
+                        appSettings.edit().putBoolean("allow_screenshots", enabled).apply()
+                    })
+                }
+                if (allowScreenshots) {
+                    Text("Screenshots may include unredacted documents or visible information. Turn this off when finished.",
+                        color = Color(0xFFFFC6A5), fontSize = 12.sp)
+                }
+                HorizontalDivider()
                 Text("Default export folder", fontWeight = FontWeight.SemiBold)
                 Text(
                     exportFolder?.let { DocumentFile.fromTreeUri(context, Uri.parse(it))?.name ?: "Previously chosen folder" }
                         ?: "Ask where to save each export",
                     color = Muted, fontSize = 13.sp
                 )
+                Text(if (exportFolder == null) "Export opens the save dialog so you can name the file."
+                     else "Export saves immediately to this folder without opening another screen.",
+                     color = Accent, fontSize = 12.sp)
                 Button(onClick = {
                     folderLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
