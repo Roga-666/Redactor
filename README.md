@@ -116,3 +116,23 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
   covered areas still blocks export. Cover those regions before trying again.
 - Exact whitelist matches are based on OCR recognition, which can still be wrong.
   Carefully inspect every document before sharing it.
+
+## v0.6.0 — Profile backup, smarter OCR, and drawing tools
+
+- **Redact** and **Erase** use identical dark buttons with a green outline
+  indicating the active tool. Icons depict a blacked-out bar and an eraser.
+- The eraser's blue trace is visible during every scribble and briefly afterward.
+  Combined gesture detection handles taps and strokes consistently.
+- Undo retains the most recent **five** document editing actions (not unlimited).
+- **Presets → Export all** saves a portable JSON backup of every preset,
+  including allowed entries and time ranges. **Import backup** merges profiles
+  without overwriting existing profiles; conflicting edits receive new IDs.
+  The JSON contains personal whitelist entries, so choose a local destination.
+- Whitelisting supports OCR that joins already-approved labels into a single
+  element, such as "EP/E" or "NP-CL"; it never approves just a substring of
+  longer unexpected OCR text. Unknown words still stay covered.
+- The bundled OCR model remains fully offline, and the APK still has no
+  Android Internet permission.
+- Exact OCR recognition of short labels is inherently imperfect: inspect
+  **every** page, particularly eraser-revealed regions, before export. Do not
+  treat builds without on-device verification as certified for sensitive data.

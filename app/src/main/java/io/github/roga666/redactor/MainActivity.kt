@@ -16,10 +16,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -34,6 +35,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -46,6 +48,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
@@ -101,7 +104,7 @@ private fun RedactorScreen() {
     var pages by remember { mutableStateOf<List<PageData>>(emptyList()) }
     var pageIndex by remember { mutableIntStateOf(0) }
     var reviewed by remember { mutableStateOf<Set<Int>>(emptySet()) }
-    var undoPage by remember { mutableStateOf<Pair<Int, PageData>?>(null) }
+    var undoHistory by remember { mutableStateOf(UndoHistory<PageData>()) }
     var tool by remember { mutableStateOf(PaintTool.COVER) }
     var showMasks by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -110,6 +113,7 @@ private fun RedactorScreen() {
     var showWhitelist by remember { mutableStateOf(false) }
     var showPresets by remember { mutableStateOf(false) }
     var showSecurity by remember { mutableStateOf(false) }
+    var showOcrDetails by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
     var allowScreenshots by remember { mutableStateOf(appSettings.getBoolean("allow_screenshots", false)) }
@@ -135,7 +139,7 @@ private fun RedactorScreen() {
         store.save(next, id)
         if (invalidate) {
             reviewed = emptySet()
-            undoPage = null
+            undoHistory = UndoHistory()
             pages = pages.map { it.copy(revealedWordIndices = emptySet()) }
         }
     }
@@ -149,7 +153,7 @@ private fun RedactorScreen() {
         val before = pages[pageIndex]
         val after = change(before)
         if (before == after) return
-        undoPage = pageIndex to before
+        undoHistory = undoHistory.record(pageIndex, before)
         pages = pages.toMutableList().apply { this[pageIndex] = after }
         reviewed = reviewed - pageIndex
         showMasks = true
@@ -165,7 +169,7 @@ private fun RedactorScreen() {
                 status = "Scanning locally…"
                 pages = emptyList()
                 reviewed = emptySet()
-                undoPage = null
+                undoHistory = UndoHistory()
                 pageIndex = 0
                 showMasks = true
                 try {
@@ -246,6 +250,62 @@ private fun RedactorScreen() {
                 status = "Default export folder saved"
             } catch (e: Exception) {
                 showExportError("Could not use selected folder: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    val exportPresetsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            val snapshot = presets.toList()
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val json = PresetTransfer.encode(snapshot)
+                        context.contentResolver.openOutputStream(uri, "wt")?.bufferedWriter(Charsets.UTF_8)?.use {
+                            it.write(json)
+                        } ?: error("Could not open the selected backup destination")
+                    }
+                    status = "Exported " + snapshot.size + " presets"
+                    Toast.makeText(context, "Preset backup saved", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    showExportError("Could not export presets: " + (e.message ?: e.javaClass.simpleName))
+                }
+            }
+        }
+    }
+
+    val importPresetsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val json = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            val out = java.io.ByteArrayOutputStream()
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val amount = stream.read(buffer)
+                                if (amount < 0) break
+                                if (amount == 0) continue
+                                require(out.size() + amount <= PresetTransfer.MAX_JSON_BYTES) {
+                                    "Preset backup exceeds the 2 MB safety limit"
+                                }
+                                out.write(buffer, 0, amount)
+                            }
+                            out.toString(Charsets.UTF_8.name())
+                        } ?: error("Could not read the selected preset backup")
+                    }
+                    val merged = PresetTransfer.merge(json, presets)
+                    if (merged.imported > 0) persist(next = merged.presets)
+                    status = "Imported " + merged.imported + " presets · " +
+                        merged.duplicatesSkipped + " duplicates skipped"
+                    Toast.makeText(context, status, Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    showExportError("Could not import presets: " + (e.message ?: e.javaClass.simpleName))
+                }
             }
         }
     }
@@ -391,19 +451,25 @@ private fun RedactorScreen() {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                FilterChip(selected = tool == PaintTool.COVER, onClick = { tool = PaintTool.COVER }, enabled = !busy,
-                    label = { Text("✎ Cover") })
-                FilterChip(selected = tool == PaintTool.ERASE, onClick = { tool = PaintTool.ERASE }, enabled = !busy,
-                    label = { Text("⌫ Erase") })
+                RedactionToolButton("Redact", PaintTool.COVER, tool == PaintTool.COVER, !busy) {
+                    tool = PaintTool.COVER
+                }
+                RedactionToolButton("Erase", PaintTool.ERASE, tool == PaintTool.ERASE, !busy) {
+                    tool = PaintTool.ERASE
+                }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = {
-                    val state = undoPage
-                    if (state != null && state.first == pageIndex && !busy) {
-                        pages = pages.toMutableList().apply { this[pageIndex] = state.second }
+                    val undo = undoHistory.takeLastFor(pageIndex)
+                    if (undo != null && !busy) {
+                        pages = pages.toMutableList().apply { this[pageIndex] = undo.first }
                         reviewed = reviewed - pageIndex
-                        undoPage = null
+                        undoHistory = undo.second
+                        showMasks = true
+                        status = "Undid last edit · review page again"
                     }
-                }, enabled = undoPage?.first == pageIndex && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) { Text("Undo") }
+                }, enabled = undoHistory.canUndo(pageIndex) && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) {
+                    Text("Undo")
+                }
                 TextButton(onClick = { showMasks = !showMasks }, enabled = pages.isNotEmpty() && !busy,
                     contentPadding = PaddingValues(horizontal = 4.dp)) { Text(if (showMasks) "Original" else "Masked") }
             }
@@ -505,8 +571,10 @@ private fun RedactorScreen() {
             },
             confirmButton = { TextButton(onClick = {
                 val updated = pages.toMutableList()
+                var nextHistory = undoHistory
                 findings.groupBy { it.pageIndex }.forEach { (index, perPage) ->
                     val original = updated[index]
+                    nextHistory = nextHistory.record(index, original)
                     val added = perPage.map { result ->
                         val b = result.word.bounds
                         val margin = maxOf(6f, b.height() * 0.25f)
@@ -519,7 +587,7 @@ private fun RedactorScreen() {
                 pages = updated
                 reviewed = reviewed - findings.map { it.pageIndex }.toSet()
                 pageIndex = findings.first().pageIndex
-                undoPage = null
+                undoHistory = nextHistory
                 showMasks = true
                 validationFindings = emptyList()
                 status = "Added ${findings.size} covers · review affected pages again"
@@ -574,6 +642,26 @@ private fun RedactorScreen() {
                     }
                 }
                 TextButton(onClick = { rangeEditIndex = -1 }) { Text("+ Add another range") }
+                if (pages.isNotEmpty()) {
+                    HorizontalDivider()
+                    TextButton(onClick = { showOcrDetails = !showOcrDetails }) {
+                        Text(if (showOcrDetails) "OCR recognition details ▴" else "OCR recognition details ▾")
+                    }
+                    if (showOcrDetails) {
+                        val source = pages[pageIndex]
+                        val approved = Whitelist.allowedIndices(source.words, allowed, ranges)
+                        val unmatched = source.words.withIndex().filter { it.index !in approved }
+                        Text("OCR guesses on this page that do not match your preset. This includes words you erased manually; a guess may differ from the actual text.",
+                            color = Muted, fontSize = 12.sp)
+                        if (unmatched.isEmpty()) Text("No unmatched OCR words found.", color = Accent, fontSize = 12.sp)
+                        unmatched.take(60).forEach { candidate ->
+                            Text("“" + candidate.value.content.take(50) + "” · confidence " +
+                                (candidate.value.confidence * 100).toInt().coerceIn(0, 100) + "%",
+                                fontSize = 12.sp)
+                        }
+                        if (unmatched.size > 60) Text("More entries omitted.", color = Muted, fontSize = 12.sp)
+                    }
+                }
                 HorizontalDivider()
                 TextButton(onClick = { showSecurity = !showSecurity }) { Text(if (showSecurity) "Privacy & safety ▴" else "Privacy & safety ▾") }
                 if (showSecurity) {
@@ -592,6 +680,22 @@ private fun RedactorScreen() {
                 .padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Presets", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Text("Each preset stores its own allowed words and time rules.", color = Muted, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = {
+                        showPresets = false
+                        exportPresetsLauncher.launch("redactor-presets.json")
+                    }, modifier = Modifier.weight(1f), enabled = !busy) {
+                        Text("Export all")
+                    }
+                    OutlinedButton(onClick = {
+                        showPresets = false
+                        importPresetsLauncher.launch(arrayOf("application/json", "text/plain"))
+                    }, modifier = Modifier.weight(1f), enabled = !busy) {
+                        Text("Import backup")
+                    }
+                }
+                Text("Backups include every preset's allowed words and time ranges. Choose local storage for privacy.",
+                    color = Muted, fontSize = 11.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(value = newPresetName, onValueChange = { newPresetName = it },
                         label = { Text("New preset name") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -706,6 +810,56 @@ private fun RangeEditor(initial: TimeRangeRule, onDismiss: () -> Unit, onSave: (
     )
 }
 
+@Composable
+private fun RedactionToolButton(
+    label: String,
+    mode: PaintTool,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.height(37.dp),
+        border = BorderStroke(if (selected) 2.dp else 1.dp,
+            if (selected) Accent else Color(0xFF576168)),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Color(0xFF292D32), contentColor = Fore
+        ),
+        contentPadding = PaddingValues(horizontal = 11.dp, vertical = 1.dp)
+    ) {
+        Canvas(Modifier.size(17.dp)) {
+            val w = size.width
+            val h = size.height
+            val ink = Fore
+            if (mode == PaintTool.ERASE) {
+                // Tilted eraser body, with a separate edge/diagonal.
+                val eraser = Path().apply {
+                    moveTo(0.15f * w, 0.64f * h)
+                    lineTo(0.51f * w, 0.12f * h)
+                    lineTo(0.90f * w, 0.43f * h)
+                    lineTo(0.55f * w, 0.88f * h)
+                    lineTo(0.33f * w, 0.88f * h)
+                    close()
+                }
+                drawPath(eraser, ink, style = Stroke(width = 1.9.dp.toPx()))
+                drawLine(ink, Offset(0.41f * w, 0.55f * h),
+                    Offset(0.70f * w, 0.77f * h), strokeWidth = 1.9.dp.toPx())
+            } else {
+                // A solid redaction bar, rather than the former pencil glyph.
+                drawRoundRect(ink, topLeft = Offset(0.08f * w, 0.43f * h),
+                    size = Size(0.84f * w, 0.34f * h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+                drawLine(ink, Offset(0.16f * w, 0.22f * h),
+                    Offset(0.83f * w, 0.22f * h), strokeWidth = 1.5.dp.toPx())
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 12.sp)
+    }
+}
+
 private data class Viewport(val scale: Float, val left: Float, val top: Float) {
     fun toSource(point: Offset, width: Int, height: Int): PointF = PointF(
         ((point.x - left) / scale).coerceIn(0f, width.toFloat()),
@@ -734,39 +888,42 @@ private fun RedactionPreview(
     val boxes = remember(page, allowed, times) { page.allBoxes(allowed, times) }
     val currentCover by rememberUpdatedState(onCover)
     val currentErase by rememberUpdatedState(onErase)
-    var started by remember(page, tool) { mutableStateOf<Offset?>(null) }
-    var current by remember(page, tool) { mutableStateOf<Offset?>(null) }
-    var stroke by remember(page, tool) { mutableStateOf<List<Offset>>(emptyList()) }
+    // Key stroke feedback to the image, not PageData: erasing changes PageData
+    // but should never interrupt the next gesture's visual trail.
+    var stroke by remember(bitmap, tool) { mutableStateOf<List<Offset>>(emptyList()) }
+    var completedStrokes by remember(bitmap, tool) { mutableIntStateOf(0) }
+    LaunchedEffect(completedStrokes, bitmap, tool) {
+        if (completedStrokes > 0) {
+            delay(300)
+            stroke = emptyList()
+        }
+    }
 
     Canvas(
         modifier = modifier.clip(RoundedCornerShape(12.dp))
             .pointerInput(tool, bitmap) {
-                detectTapGestures(onTap = { point ->
-                    val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                    val source = listOf(v.toSource(point, bitmap.width, bitmap.height))
-                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
-                })
-            }
-            .pointerInput(tool, bitmap) {
-                detectDragGestures(
-                    onDragStart = { started = it; current = it; stroke = listOf(it) },
-                    onDrag = { event, _ ->
-                        current = event.position
-                        stroke = stroke + event.position
-                        event.consume()
-                    },
-                    onDragEnd = {
-                        val first = started
-                        val last = current
-                        if (first != null && last != null) {
-                            val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                            val trace = stroke.map { v.toSource(it, bitmap.width, bitmap.height) }
-                            if (tool == PaintTool.COVER) currentCover(trace) else currentErase(trace)
+                // One gesture recognizer handles both taps and scribbles. Separate
+                // detectors previously competed for touches on fast successive edits.
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var points = listOf(down.position)
+                    stroke = points
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.position != points.last()) {
+                            points = points + change.position
+                            stroke = points
                         }
-                        started = null; current = null; stroke = emptyList()
-                    },
-                    onDragCancel = { started = null; current = null; stroke = emptyList() }
-                )
+                        if (!change.pressed) break
+                        change.consume()
+                    }
+                    val v = viewport(size.width.toFloat(), size.height.toFloat(),
+                        bitmap.width, bitmap.height)
+                    val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
+                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
+                    completedStrokes++
+                }
             }
     ) {
         val v = viewport(size.width, size.height, bitmap.width, bitmap.height)
@@ -782,12 +939,11 @@ private fun RedactionPreview(
             if (masksVisible) drawRect(Color.Black, topLeft = p, size = sz)
             else drawRect(Color(0xFFFF7474), topLeft = p, size = sz, style = Stroke(2.2f))
         }
-        if (started != null && current != null) {
-            if (tool == PaintTool.COVER) {
-                stroke.forEach { drawCircle(Color(0xFFFFC773).copy(alpha = 0.65f), radius = 5f, center = it) }
-            } else {
-                stroke.forEach { drawCircle(Accent.copy(alpha = 0.55f), radius = 7f, center = it) }
-            }
+        // Draw every live stroke, plus a brief 300ms confirmation after lifting.
+        val trail = if (tool == PaintTool.ERASE) Color(0xFF68B7FF) else Color(0xFFFFC773)
+        stroke.zipWithNext().forEach { (a, b) ->
+            drawLine(trail.copy(alpha = 0.92f), a, b, strokeWidth = 5.dp.toPx())
         }
+        stroke.forEach { drawCircle(trail.copy(alpha = 0.82f), radius = 3.dp.toPx(), center = it) }
     }
 }
