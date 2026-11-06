@@ -90,3 +90,16 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
 - **Settings (⚙):** choose a default export directory through Android's Storage Access Framework; Redactor retains the selected directory permission and writes new PNG/PDF files directly there. Use **Ask every time instead** to restore the regular Save As picker. Not all folder providers are local—select an on-device directory to avoid cloud sync.
 - **Preserved security design:** no Internet permission, bundled OCR, flattened output. A successful OCR recheck is not an absolute proof of no sensitive information; human inspection remains essential.
 - **Build:** GitHub Actions compiles `app-debug.apk` under the latest Android APK workflow. An Android 11+ picker may refuse selecting root Downloads or root of shared storage; create a dedicated subfolder in Documents instead.
+
+
+## v0.4.0 — Screenshots and automatic export destinations
+
+- Screenshots and screen recording remain blocked by default. In **Settings → Allow screenshots**,
+  explicitly enable capture (and disable it again when finished). This is saved locally.
+  Enabling captures can expose unredacted document contents, including in recent-app previews.
+- The reviewed toggle reads **Review** / **Reviewed** (no checkmark).
+- With a default export folder, **Export PNG** and **Export PDF** write there immediately without
+  launching the Android filename/location picker. A brief success toast confirms saving.
+  If no folder is selected, Android's CreateDocument screen still lets you name and place the file.
+- Note: OCR whitelist misclassifications are under investigation; the screenshot toggle helps
+  collect non-sensitive reproduction screenshots. Secure export still requires review.
