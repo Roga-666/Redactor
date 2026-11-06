@@ -5,7 +5,7 @@ on:
   pull_request:
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write # Required only to publish versioned prerelease APK assets on main.
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -41,3 +41,19 @@ jobs:
           name: Redactor-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Publish direct APK to GitHub Releases (main branch only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)"/\1/p' app/build.gradle.kts | head -1)
+          test -n "$VERSION"
+          ASSET="Redactor-v${VERSION}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$ASSET"
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Existing v${VERSION} release preserved; not replacing its signing key."
+          else
+            gh release create "v${VERSION}" "$ASSET" --target "$GITHUB_SHA" --title "Redactor v${VERSION} (experimental)" --prerelease \
+              --notes "Experimental fully offline Android redaction prototype. Every page requires manual review. Debug-signed APKs may not install over previous builds without uninstalling; export presets first. Do not rely on this as certified secure redaction software."
+          fi
