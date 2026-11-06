@@ -113,6 +113,7 @@ private fun RedactorScreen() {
     var showWhitelist by remember { mutableStateOf(false) }
     var showPresets by remember { mutableStateOf(false) }
     var showSecurity by remember { mutableStateOf(false) }
+    var showOcrDetails by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
     var allowScreenshots by remember { mutableStateOf(appSettings.getBoolean("allow_screenshots", false)) }
@@ -641,6 +642,26 @@ private fun RedactorScreen() {
                     }
                 }
                 TextButton(onClick = { rangeEditIndex = -1 }) { Text("+ Add another range") }
+                if (pages.isNotEmpty()) {
+                    HorizontalDivider()
+                    TextButton(onClick = { showOcrDetails = !showOcrDetails }) {
+                        Text(if (showOcrDetails) "OCR recognition details ▴" else "OCR recognition details ▾")
+                    }
+                    if (showOcrDetails) {
+                        val source = pages[pageIndex]
+                        val approved = Whitelist.allowedIndices(source.words, allowed, ranges)
+                        val unmatched = source.words.withIndex().filter { it.index !in approved }
+                        Text("OCR guesses on this page that do not match your preset. This includes words you erased manually; a guess may differ from the actual text.",
+                            color = Muted, fontSize = 12.sp)
+                        if (unmatched.isEmpty()) Text("No unmatched OCR words found.", color = Accent, fontSize = 12.sp)
+                        unmatched.take(60).forEach { candidate ->
+                            Text("“" + candidate.value.content.take(50) + "” · confidence " +
+                                (candidate.value.confidence * 100).toInt().coerceIn(0, 100) + "%",
+                                fontSize = 12.sp)
+                        }
+                        if (unmatched.size > 60) Text("More entries omitted.", color = Muted, fontSize = 12.sp)
+                    }
+                }
                 HorizontalDivider()
                 TextButton(onClick = { showSecurity = !showSecurity }) { Text(if (showSecurity) "Privacy & safety ▴" else "Privacy & safety ▾") }
                 if (showSecurity) {
