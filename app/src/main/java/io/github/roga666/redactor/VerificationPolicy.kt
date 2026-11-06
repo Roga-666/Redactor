@@ -54,11 +54,21 @@ object VerificationPolicy {
     private fun equivalent(originalText: String, observedNormalized: String): Boolean {
         val source = Whitelist.normalize(originalText)
         if (source == observedNormalized) return true
-        // An OCR element sometimes covers a whole approved phrase in one pass and
-        // individual words in the next pass. Only complete component words qualify.
-        if (source.split(Regex("\\s+")).any { it == observedNormalized }) return true
+
+        // A phrase can be OCR'd with spaces in one pass and punctuation
+        // in another (e.g. "EP CL" vs "EP/CL"). Compare whole components.
+        val sourceParts = components(originalText)
+        val foundParts = components(observedNormalized)
+        if (sourceParts.isNotEmpty() && sourceParts == foundParts) return true
+        if (foundParts.isNotEmpty() && sourceParts.size >= foundParts.size &&
+            sourceParts.windowed(foundParts.size).any { it == foundParts }) return true
+
         val a = TimeRangeRule.parseClockTime(originalText)
         val b = TimeRangeRule.parseClockTime(observedNormalized)
         return a != null && a == b
     }
+
+    private fun components(text: String): List<String> =
+        Whitelist.normalize(text).split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter(String::isNotBlank)
 }
