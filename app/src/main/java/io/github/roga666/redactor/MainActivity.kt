@@ -253,6 +253,62 @@ private fun RedactorScreen() {
         }
     }
 
+    val exportPresetsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            val snapshot = presets.toList()
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val json = PresetTransfer.encode(snapshot)
+                        context.contentResolver.openOutputStream(uri, "wt")?.bufferedWriter(Charsets.UTF_8)?.use {
+                            it.write(json)
+                        } ?: error("Could not open the selected backup destination")
+                    }
+                    status = "Exported " + snapshot.size + " presets"
+                    Toast.makeText(context, "Preset backup saved", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    showExportError("Could not export presets: " + (e.message ?: e.javaClass.simpleName))
+                }
+            }
+        }
+    }
+
+    val importPresetsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                try {
+                    val json = withContext(Dispatchers.IO) {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            val out = java.io.ByteArrayOutputStream()
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val amount = stream.read(buffer)
+                                if (amount < 0) break
+                                if (amount == 0) continue
+                                require(out.size() + amount <= PresetTransfer.MAX_JSON_BYTES) {
+                                    "Preset backup exceeds the 2 MB safety limit"
+                                }
+                                out.write(buffer, 0, amount)
+                            }
+                            out.toString(Charsets.UTF_8.name())
+                        } ?: error("Could not read the selected preset backup")
+                    }
+                    val merged = PresetTransfer.merge(json, presets)
+                    if (merged.imported > 0) persist(next = merged.presets)
+                    status = "Imported " + merged.imported + " presets · " +
+                        merged.duplicatesSkipped + " duplicates skipped"
+                    Toast.makeText(context, status, Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    showExportError("Could not import presets: " + (e.message ?: e.javaClass.simpleName))
+                }
+            }
+        }
+    }
+
     fun requestExport(pdf: Boolean) {
         if (!ready) { status = "Review every page before export"; return }
         val pageIndices = if (pdf) pages.indices.toList() else listOf(pageIndex)
@@ -601,6 +657,22 @@ private fun RedactorScreen() {
                 .padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("Presets", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                 Text("Each preset stores its own allowed words and time rules.", color = Muted, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = {
+                        showPresets = false
+                        exportPresetsLauncher.launch("redactor-presets.json")
+                    }, modifier = Modifier.weight(1f), enabled = !busy) {
+                        Text("Export all")
+                    }
+                    OutlinedButton(onClick = {
+                        showPresets = false
+                        importPresetsLauncher.launch(arrayOf("application/json", "text/plain"))
+                    }, modifier = Modifier.weight(1f), enabled = !busy) {
+                        Text("Import backup")
+                    }
+                }
+                Text("Backups include every preset's allowed words and time ranges. Choose local storage for privacy.",
+                    color = Muted, fontSize = 11.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(value = newPresetName, onValueChange = { newPresetName = it },
                         label = { Text("New preset name") }, singleLine = true, modifier = Modifier.weight(1f))
