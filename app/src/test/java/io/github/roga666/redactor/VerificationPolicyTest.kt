@@ -45,7 +45,7 @@ class VerificationPolicyTest {
             ExpectedWord("EP", TextBounds(100, 20, 132, 42)), emptyList(), emptyList()))
     }
 
-    @Test fun \`whitelisted composite labels survive differing OCR segmentation at export\`() {
+    @Test fun `whitelisted composite labels survive differing OCR segmentation at export`() {
         val source = ExpectedWord("EP/CL", TextBounds(100, 20, 160, 42))
         assertTrue(VerificationPolicy.isExpected(
             ExpectedWord("EP CL", TextBounds(100, 20, 160, 42)), listOf(source), emptyList()))
