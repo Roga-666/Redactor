@@ -103,3 +103,16 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
   If no folder is selected, Android's CreateDocument screen still lets you name and place the file.
 - Note: OCR whitelist misclassifications are under investigation; the screenshot toggle helps
   collect non-sensitive reproduction screenshots. Secure export still requires review.
+
+## v0.5.0 — OCR whitelist verification fix
+
+- An **exact** user-whitelisted OCR word or phrase is no longer automatically covered
+  solely because OCR reports less than 80% confidence. Every page still requires
+  deliberate review. The UI reports weak-confidence permitted matches.
+- Export verification matches surviving text to **original visible source regions**
+  that were allowed (or manually revealed); a different confidence score in the
+  second pass cannot turn an original permitted `EP` or `E` into an export error.
+- Unexpected text, fragments like `N`, unrecognized source text, or text within
+  covered areas still blocks export. Cover those regions before trying again.
+- Exact whitelist matches are based on OCR recognition, which can still be wrong.
+  Carefully inspect every document before sharing it.
