@@ -715,6 +715,56 @@ private fun RangeEditor(initial: TimeRangeRule, onDismiss: () -> Unit, onSave: (
     )
 }
 
+@Composable
+private fun RedactionToolButton(
+    label: String,
+    mode: PaintTool,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.height(37.dp),
+        border = BorderStroke(if (selected) 2.dp else 1.dp,
+            if (selected) Accent else Color(0xFF576168)),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = Color(0xFF292D32), contentColor = Fore
+        ),
+        contentPadding = PaddingValues(horizontal = 11.dp, vertical = 1.dp)
+    ) {
+        Canvas(Modifier.size(17.dp)) {
+            val w = size.width
+            val h = size.height
+            val ink = Fore
+            if (mode == PaintTool.ERASE) {
+                // Tilted eraser body, with a separate edge/diagonal.
+                val eraser = Path().apply {
+                    moveTo(0.15f * w, 0.64f * h)
+                    lineTo(0.51f * w, 0.12f * h)
+                    lineTo(0.90f * w, 0.43f * h)
+                    lineTo(0.55f * w, 0.88f * h)
+                    lineTo(0.33f * w, 0.88f * h)
+                    close()
+                }
+                drawPath(eraser, ink, style = Stroke(width = 1.9.dp.toPx()))
+                drawLine(ink, Offset(0.41f * w, 0.55f * h),
+                    Offset(0.70f * w, 0.77f * h), strokeWidth = 1.9.dp.toPx())
+            } else {
+                // A solid redaction bar, rather than the former pencil glyph.
+                drawRoundRect(ink, topLeft = Offset(0.08f * w, 0.43f * h),
+                    size = Size(0.84f * w, 0.34f * h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+                drawLine(ink, Offset(0.16f * w, 0.22f * h),
+                    Offset(0.83f * w, 0.22f * h), strokeWidth = 1.5.dp.toPx())
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(label, fontSize = 12.sp)
+    }
+}
+
 private data class Viewport(val scale: Float, val left: Float, val top: Float) {
     fun toSource(point: Offset, width: Int, height: Int): PointF = PointF(
         ((point.x - left) / scale).coerceIn(0f, width.toFloat()),
@@ -743,39 +793,42 @@ private fun RedactionPreview(
     val boxes = remember(page, allowed, times) { page.allBoxes(allowed, times) }
     val currentCover by rememberUpdatedState(onCover)
     val currentErase by rememberUpdatedState(onErase)
-    var started by remember(page, tool) { mutableStateOf<Offset?>(null) }
-    var current by remember(page, tool) { mutableStateOf<Offset?>(null) }
-    var stroke by remember(page, tool) { mutableStateOf<List<Offset>>(emptyList()) }
+    // Key stroke feedback to the image, not PageData: erasing changes PageData
+    // but should never interrupt the next gesture's visual trail.
+    var stroke by remember(bitmap, tool) { mutableStateOf<List<Offset>>(emptyList()) }
+    var completedStrokes by remember(bitmap, tool) { mutableIntStateOf(0) }
+    LaunchedEffect(completedStrokes, bitmap, tool) {
+        if (completedStrokes > 0) {
+            delay(300)
+            stroke = emptyList()
+        }
+    }
 
     Canvas(
         modifier = modifier.clip(RoundedCornerShape(12.dp))
             .pointerInput(tool, bitmap) {
-                detectTapGestures(onTap = { point ->
-                    val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                    val source = listOf(v.toSource(point, bitmap.width, bitmap.height))
-                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
-                })
-            }
-            .pointerInput(tool, bitmap) {
-                detectDragGestures(
-                    onDragStart = { started = it; current = it; stroke = listOf(it) },
-                    onDrag = { event, _ ->
-                        current = event.position
-                        stroke = stroke + event.position
-                        event.consume()
-                    },
-                    onDragEnd = {
-                        val first = started
-                        val last = current
-                        if (first != null && last != null) {
-                            val v = viewport(size.width.toFloat(), size.height.toFloat(), bitmap.width, bitmap.height)
-                            val trace = stroke.map { v.toSource(it, bitmap.width, bitmap.height) }
-                            if (tool == PaintTool.COVER) currentCover(trace) else currentErase(trace)
+                // One gesture recognizer handles both taps and scribbles. Separate
+                // detectors previously competed for touches on fast successive edits.
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var points = listOf(down.position)
+                    stroke = points
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.position != points.last()) {
+                            points = points + change.position
+                            stroke = points
                         }
-                        started = null; current = null; stroke = emptyList()
-                    },
-                    onDragCancel = { started = null; current = null; stroke = emptyList() }
-                )
+                        if (!change.pressed) break
+                        change.consume()
+                    }
+                    val v = viewport(size.width.toFloat(), size.height.toFloat(),
+                        bitmap.width, bitmap.height)
+                    val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
+                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
+                    completedStrokes++
+                }
             }
     ) {
         val v = viewport(size.width, size.height, bitmap.width, bitmap.height)
@@ -791,12 +844,11 @@ private fun RedactionPreview(
             if (masksVisible) drawRect(Color.Black, topLeft = p, size = sz)
             else drawRect(Color(0xFFFF7474), topLeft = p, size = sz, style = Stroke(2.2f))
         }
-        if (started != null && current != null) {
-            if (tool == PaintTool.COVER) {
-                stroke.forEach { drawCircle(Color(0xFFFFC773).copy(alpha = 0.65f), radius = 5f, center = it) }
-            } else {
-                stroke.forEach { drawCircle(Accent.copy(alpha = 0.55f), radius = 7f, center = it) }
-            }
+        // Draw every live stroke, plus a brief 300ms confirmation after lifting.
+        val trail = if (tool == PaintTool.ERASE) Color(0xFF68B7FF) else Color(0xFFFFC773)
+        stroke.zipWithNext().forEach { (a, b) ->
+            drawLine(trail.copy(alpha = 0.92f), a, b, strokeWidth = 5.dp.toPx())
         }
+        stroke.forEach { drawCircle(trail.copy(alpha = 0.82f), radius = 3.dp.toPx(), center = it) }
     }
 }
