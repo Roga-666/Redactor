@@ -46,7 +46,20 @@ fun PageData.eraseAt(points: List<android.graphics.PointF>, terms: Set<String>, 
     val manualHits = mutableSetOf<Int>()
     val revealed = mutableSetOf<Int>()
     val visibleAuto = autoWordIndices(terms, times)
-    points.forEach { point ->
+    // Sample between OS touch points; quick scribbles can cross a short black
+    // box without Android sending a touch event *inside* that rectangle.
+    val samples = buildList {
+        if (points.isNotEmpty()) add(points.first())
+        points.zipWithNext().forEach { (a, b) ->
+            val steps = (maxOf(kotlin.math.abs(b.x - a.x), kotlin.math.abs(b.y - a.y)) / 7f)
+                .toInt().coerceIn(1, 600)
+            for (i in 1..steps) {
+                val ratio = i.toFloat() / steps
+                add(PointF(a.x + (b.x - a.x) * ratio, a.y + (b.y - a.y) * ratio))
+            }
+        }
+    }
+    samples.forEach { point ->
         // Manually drawn masks are above auto masks. Remove only the topmost object at each point.
         val manualHit = manualBoxes.indices.lastOrNull { i -> manualBoxes[i].contains(point.x, point.y) }
         if (manualHit != null) manualHits += manualHit
