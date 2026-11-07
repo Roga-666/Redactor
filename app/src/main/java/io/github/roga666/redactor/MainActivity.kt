@@ -167,6 +167,45 @@ private fun RedactorScreen() {
         status = "Change saved · review this page again"
     }
 
+
+    fun whitelistCurrentPage(points: List<PointF>) {
+        if (busy || pages.isEmpty()) return
+        val before = pages[pageIndex]
+        val picked = before.whitelistAt(points, allowed, ranges)
+        if (picked.touchedIndices.isEmpty()) {
+            status = "No covered OCR word found · manually add undetected text in Allowed"
+            return
+        }
+        val toAdd = picked.words.filter { term -> Whitelist.normalize(term) !in allowed }
+        if (toAdd.isEmpty() && picked.updatedPage == before) {
+            status = "OCR text already whitelisted · use Erase for remaining manual masks"
+            return
+        }
+
+        undoHistory = undoHistory.record(pageIndex, EditSnapshot(before, active.id, active.allowedText))
+        val updatedAllowed = if (toAdd.isEmpty()) active.allowedText else {
+            active.allowedText.trimEnd() + (if (active.allowedText.isBlank()) "" else "\n") +
+                toAdd.joinToString("\n")
+        }
+        // The whitelist belongs to the selected preset, so matching labels on
+        // other pages also change. All existing reviews must be performed again.
+        persist(
+            next = presets.map { if (it.id == active.id) it.copy(allowedText = updatedAllowed) else it },
+            invalidate = false
+        )
+        pages = pages.toMutableList().apply { this[pageIndex] = picked.updatedPage }
+        reviewed = emptySet()
+        status = when {
+            toAdd.size == 1 -> "Added to " + active.name + ": " + toAdd.first().take(45)
+            toAdd.size > 1 -> "Added " + toAdd.size + " items to " + active.name
+            else -> "Restored selected approved OCR masks"
+        }
+        if (picked.removedManualMasks == 0 && before.manualBoxes.isNotEmpty()) {
+            status += " · broad manual masks remain"
+        }
+        Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
+    }
+
     val ready = pages.isNotEmpty() && reviewed.size == pages.size && !busy
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
@@ -470,7 +509,8 @@ private fun RedactorScreen() {
                             if (after == before) status = "No OCR word here · drag to cover a missed area"
                             else editCurrentPage { after }
                         },
-                        onErase = { points -> editCurrentPage { it.eraseAt(points, allowed, ranges) } }
+                        onErase = { points -> editCurrentPage { it.eraseAt(points, allowed, ranges) } },
+                        onWhitelist = { points -> whitelistCurrentPage(points) }
                     )
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(20.dp)) {
@@ -480,12 +520,17 @@ private fun RedactorScreen() {
                     }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 RedactionToolButton("Redact", PaintTool.COVER, tool == PaintTool.COVER, !busy) {
                     tool = PaintTool.COVER
                 }
                 RedactionToolButton("Erase", PaintTool.ERASE, tool == PaintTool.ERASE, !busy) {
                     tool = PaintTool.ERASE
+                }
+                RedactionToolButton("Whitelist", PaintTool.WHITELIST, tool == PaintTool.WHITELIST, !busy) {
+                    tool = PaintTool.WHITELIST
+                    showMasks = true
+                    status = "Whitelist mode · tap or scribble across highlighted OCR words"
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = {
