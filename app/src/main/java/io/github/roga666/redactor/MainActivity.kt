@@ -60,7 +60,9 @@ private val Accent = Color(0xFF7BDCB5)
 private val Back = Color(0xFF101417)
 private val Fore = Color(0xFFF2F4F5)
 private val Muted = Color(0xFF9DAEB4)
-private enum class PaintTool { COVER, ERASE }
+private enum class PaintTool { COVER, ERASE, WHITELIST }
+/** Snapshot both page masks and, for Whitelist touches, the prior persisted preset text. */
+private data class EditSnapshot(val page: PageData, val presetId: String? = null, val allowedTextBefore: String? = null)
 private data class VerificationFinding(val pageIndex: Int, val word: WordRegion)
 private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val name: String, val ocrWarnings: Int = 0) {
     fun dispose() = pages.forEach { if (!it.isRecycled) it.recycle() }
@@ -104,7 +106,7 @@ private fun RedactorScreen() {
     var pages by remember { mutableStateOf<List<PageData>>(emptyList()) }
     var pageIndex by remember { mutableIntStateOf(0) }
     var reviewed by remember { mutableStateOf<Set<Int>>(emptySet()) }
-    var undoHistory by remember { mutableStateOf(UndoHistory<PageData>()) }
+    var undoHistory by remember { mutableStateOf(UndoHistory<EditSnapshot>()) }
     var tool by remember { mutableStateOf(PaintTool.COVER) }
     var showMasks by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -158,7 +160,7 @@ private fun RedactorScreen() {
         val before = pages[pageIndex]
         val after = change(before)
         if (before == after) return
-        undoHistory = undoHistory.record(pageIndex, before)
+        undoHistory = undoHistory.record(pageIndex, EditSnapshot(before))
         pages = pages.toMutableList().apply { this[pageIndex] = after }
         reviewed = reviewed - pageIndex
         showMasks = true
@@ -489,11 +491,23 @@ private fun RedactorScreen() {
                 TextButton(onClick = {
                     val undo = undoHistory.takeLastFor(pageIndex)
                     if (undo != null && !busy) {
-                        pages = pages.toMutableList().apply { this[pageIndex] = undo.first }
-                        reviewed = reviewed - pageIndex
+                        pages = pages.toMutableList().apply { this[pageIndex] = undo.first.page }
+                        if (undo.first.allowedTextBefore != null) {
+                            // Undo the whitelist mutation globally, then persist immediately.
+                            val oldId = undo.first.presetId
+                            val restored = presets.map { preset ->
+                                if (preset.id == oldId) preset.copy(allowedText = undo.first.allowedTextBefore)
+                                else preset
+                            }
+                            persist(next = restored, invalidate = false)
+                            reviewed = emptySet()
+                            status = "Whitelist change undone · review pages again"
+                        } else {
+                            reviewed = reviewed - pageIndex
+                            status = "Undid last edit · review page again"
+                        }
                         undoHistory = undo.second
                         showMasks = true
-                        status = "Undid last edit · review page again"
                     }
                 }, enabled = undoHistory.canUndo(pageIndex) && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) {
                     Text("Undo")
@@ -627,7 +641,7 @@ private fun RedactorScreen() {
                 var nextHistory = undoHistory
                 findings.groupBy { it.pageIndex }.forEach { (index, perPage) ->
                     val original = updated[index]
-                    nextHistory = nextHistory.record(index, original)
+                    nextHistory = nextHistory.record(index, EditSnapshot(original))
                     val added = perPage.map { result ->
                         val b = result.word.bounds
                         val margin = maxOf(6f, b.height() * 0.25f)
