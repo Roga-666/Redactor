@@ -66,4 +66,19 @@ class WhitelistGestureTest {
         assertTrue(hit.updatedPage.forcedCoveredWordIndices.isEmpty())
         p.bitmap.recycle()
     }
+
+    @Test fun tappingAWordWithUnavailableOcrConfidenceRevealsThatLocation() {
+        val original = page()
+        val changed = original.copy(words = original.words.mapIndexed { index, word ->
+            if (index == 0) word.copy(confidence = -1f) else word
+        })
+        val tapped = changed.whitelistAt(listOf(PointF(55f, 45f)), emptySet(), emptyList())
+        assertEquals(listOf("EP"), tapped.words)
+        assertTrue(0 in tapped.updatedPage.revealedWordIndices)
+        // Even if the saved profile can't automatically accept negative-confidence
+        // OCR elsewhere, this one deliberately approved source word becomes visible.
+        assertFalse(0 in tapped.updatedPage.autoWordIndices(Whitelist.parse("EP"), emptyList()))
+        original.bitmap.recycle()
+    }
+
 }
