@@ -159,7 +159,10 @@ fun PageData.whitelistAt(
         words = selections,
         updatedPage = copy(
             forcedCoveredWordIndices = forcedCoveredWordIndices - eligible,
-            revealedWordIndices = revealedWordIndices - eligible,
+            // The explicitly selected source locations are approved even when
+            // ML Kit supplies a weak/unavailable (-1) confidence score.
+            // Other positions still require matching the saved whitelist.
+            revealedWordIndices = revealedWordIndices + eligible,
             manualBoxes = manualBoxes.filterIndexed { index, _ -> index !in removeMasks }
         ),
         touchedIndices = eligible,
