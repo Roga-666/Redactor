@@ -939,9 +939,9 @@ private fun RedactionToolButton(
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = Color(0xFF292D32), contentColor = Fore
         ),
-        contentPadding = PaddingValues(horizontal = 11.dp, vertical = 1.dp)
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 1.dp)
     ) {
-        Canvas(Modifier.size(17.dp)) {
+        Canvas(Modifier.size(15.dp)) {
             val w = size.width
             val h = size.height
             val ink = Fore
@@ -958,6 +958,16 @@ private fun RedactionToolButton(
                 drawPath(eraser, ink, style = Stroke(width = 1.9.dp.toPx()))
                 drawLine(ink, Offset(0.41f * w, 0.55f * h),
                     Offset(0.70f * w, 0.77f * h), strokeWidth = 1.9.dp.toPx())
+            } else if (mode == PaintTool.WHITELIST) {
+                // Outlined tag with a plus sign: add selected source word to the preset.
+                drawRoundRect(ink, topLeft = Offset(0.07f * w, 0.13f * h),
+                    size = Size(0.86f * w, 0.75f * h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()),
+                    style = Stroke(width = 1.7.dp.toPx()))
+                drawLine(ink, Offset(0.50f * w, 0.30f * h),
+                    Offset(0.50f * w, 0.70f * h), strokeWidth = 1.8.dp.toPx())
+                drawLine(ink, Offset(0.31f * w, 0.50f * h),
+                    Offset(0.69f * w, 0.50f * h), strokeWidth = 1.8.dp.toPx())
             } else {
                 // A solid redaction bar, rather than the former pencil glyph.
                 drawRoundRect(ink, topLeft = Offset(0.08f * w, 0.43f * h),
@@ -967,8 +977,8 @@ private fun RedactionToolButton(
                     Offset(0.83f * w, 0.22f * h), strokeWidth = 1.5.dp.toPx())
             }
         }
-        Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 12.sp)
+        Spacer(Modifier.width(4.dp))
+        Text(label, fontSize = 11.sp, maxLines = 1)
     }
 }
 
@@ -993,13 +1003,15 @@ private fun RedactionPreview(
     tool: PaintTool,
     modifier: Modifier,
     onCover: (List<PointF>) -> Unit,
-    onErase: (List<PointF>) -> Unit
+    onErase: (List<PointF>) -> Unit,
+    onWhitelist: (List<PointF>) -> Unit
 ) {
     val bitmap = page.bitmap
     val image = remember(bitmap) { bitmap.asImageBitmap() }
     val boxes = remember(page, allowed, times) { page.allBoxes(allowed, times) }
     val currentCover by rememberUpdatedState(onCover)
     val currentErase by rememberUpdatedState(onErase)
+    val currentWhitelist by rememberUpdatedState(onWhitelist)
     // Key stroke feedback to the image, not PageData: erasing changes PageData
     // but should never interrupt the next gesture's visual trail.
     var stroke by remember(bitmap, tool) { mutableStateOf<List<Offset>>(emptyList()) }
@@ -1033,7 +1045,11 @@ private fun RedactionPreview(
                     val v = viewport(size.width.toFloat(), size.height.toFloat(),
                         bitmap.width, bitmap.height)
                     val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
-                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
+                    when (tool) {
+                        PaintTool.COVER -> currentCover(source)
+                        PaintTool.ERASE -> currentErase(source)
+                        PaintTool.WHITELIST -> currentWhitelist(source)
+                    }
                     completedStrokes++
                 }
             }
@@ -1048,11 +1064,21 @@ private fun RedactionPreview(
         for (box in boxes) {
             val p = Offset(v.left + box.left * v.scale, v.top + box.top * v.scale)
             val sz = Size(box.width() * v.scale, box.height() * v.scale)
-            if (masksVisible) drawRect(Color.Black, topLeft = p, size = sz)
+            if (tool == PaintTool.WHITELIST) {
+                // Preview only: the source text remains readable under an amber tint.
+                // SecureExporter still uses solid, irreversible masks on export.
+                drawRect(Color(0xFFFFCF68).copy(alpha = 0.30f), topLeft = p, size = sz)
+                drawRect(Color(0xFFEDAA32).copy(alpha = 0.95f), topLeft = p, size = sz,
+                    style = Stroke(1.4.dp.toPx()))
+            } else if (masksVisible) drawRect(Color.Black, topLeft = p, size = sz)
             else drawRect(Color(0xFFFF7474), topLeft = p, size = sz, style = Stroke(2.2f))
         }
         // Draw every live stroke, plus a brief 300ms confirmation after lifting.
-        val trail = if (tool == PaintTool.ERASE) Color(0xFF68B7FF) else Color(0xFFFFC773)
+        val trail = when (tool) {
+            PaintTool.ERASE -> Color(0xFF68B7FF)
+            PaintTool.WHITELIST -> Accent
+            PaintTool.COVER -> Color(0xFFFFC773)
+        }
         stroke.zipWithNext().forEach { (a, b) ->
             drawLine(trail.copy(alpha = 0.92f), a, b, strokeWidth = 5.dp.toPx())
         }
