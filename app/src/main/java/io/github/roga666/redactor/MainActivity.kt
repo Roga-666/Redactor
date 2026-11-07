@@ -556,8 +556,12 @@ private fun RedactorScreen() {
                 }, enabled = undoHistory.canUndo(pageIndex) && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) {
                     Text("Undo")
                 }
-                TextButton(onClick = { showMasks = !showMasks }, enabled = pages.isNotEmpty() && !busy,
-                    contentPadding = PaddingValues(horizontal = 4.dp)) { Text(if (showMasks) "Original" else "Masked") }
+                TextButton(onClick = { showMasks = !showMasks },
+                    enabled = pages.isNotEmpty() && !busy && tool != PaintTool.WHITELIST,
+                    contentPadding = PaddingValues(horizontal = 3.dp)) {
+                    Text(if (tool == PaintTool.WHITELIST) "Live"
+                         else if (showMasks) "Original" else "Masked", fontSize = 11.sp)
+                }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = { pageIndex--; showMasks = true }, enabled = pageIndex > 0 && !busy,
