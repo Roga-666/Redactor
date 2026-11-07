@@ -60,7 +60,9 @@ private val Accent = Color(0xFF7BDCB5)
 private val Back = Color(0xFF101417)
 private val Fore = Color(0xFFF2F4F5)
 private val Muted = Color(0xFF9DAEB4)
-private enum class PaintTool { COVER, ERASE }
+private enum class PaintTool { COVER, ERASE, WHITELIST }
+/** Snapshot both page masks and, for Whitelist touches, the prior persisted preset text. */
+private data class EditSnapshot(val page: PageData, val presetId: String? = null, val allowedTextBefore: String? = null)
 private data class VerificationFinding(val pageIndex: Int, val word: WordRegion)
 private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val name: String, val ocrWarnings: Int = 0) {
     fun dispose() = pages.forEach { if (!it.isRecycled) it.recycle() }
@@ -104,7 +106,7 @@ private fun RedactorScreen() {
     var pages by remember { mutableStateOf<List<PageData>>(emptyList()) }
     var pageIndex by remember { mutableIntStateOf(0) }
     var reviewed by remember { mutableStateOf<Set<Int>>(emptySet()) }
-    var undoHistory by remember { mutableStateOf(UndoHistory<PageData>()) }
+    var undoHistory by remember { mutableStateOf(UndoHistory<EditSnapshot>()) }
     var tool by remember { mutableStateOf(PaintTool.COVER) }
     var showMasks by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
@@ -158,11 +160,48 @@ private fun RedactorScreen() {
         val before = pages[pageIndex]
         val after = change(before)
         if (before == after) return
-        undoHistory = undoHistory.record(pageIndex, before)
+        undoHistory = undoHistory.record(pageIndex, EditSnapshot(before))
         pages = pages.toMutableList().apply { this[pageIndex] = after }
         reviewed = reviewed - pageIndex
         showMasks = true
         status = "Change saved · review this page again"
+    }
+
+
+    fun whitelistCurrentPage(points: List<PointF>) {
+        if (busy || pages.isEmpty()) return
+        val before = pages[pageIndex]
+        val picked = before.whitelistAt(points, allowed, ranges)
+        if (picked.touchedIndices.isEmpty()) {
+            status = "No covered OCR word found · manually add undetected text in Allowed"
+            return
+        }
+        val edit = WhitelistEditor.add(active.allowedText, picked.words)
+        val toAdd = edit.added
+        if (toAdd.isEmpty() && picked.updatedPage == before) {
+            status = "OCR text already whitelisted · use Erase for remaining manual masks"
+            return
+        }
+
+        undoHistory = undoHistory.record(pageIndex, EditSnapshot(before, active.id, active.allowedText))
+        val updatedAllowed = edit.text
+        // The whitelist belongs to the selected preset, so matching labels on
+        // other pages also change. All existing reviews must be performed again.
+        persist(
+            next = presets.map { if (it.id == active.id) it.copy(allowedText = updatedAllowed) else it },
+            invalidate = false
+        )
+        pages = pages.toMutableList().apply { this[pageIndex] = picked.updatedPage }
+        reviewed = emptySet()
+        status = when {
+            toAdd.size == 1 -> "Added to " + active.name + ": " + toAdd.first().take(45)
+            toAdd.size > 1 -> "Added " + toAdd.size + " items to " + active.name
+            else -> "Restored selected approved OCR masks"
+        }
+        if (picked.removedManualMasks == 0 && before.manualBoxes.isNotEmpty()) {
+            status += " · broad manual masks remain"
+        }
+        Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
     }
 
     val ready = pages.isNotEmpty() && reviewed.size == pages.size && !busy
@@ -468,7 +507,8 @@ private fun RedactorScreen() {
                             if (after == before) status = "No OCR word here · drag to cover a missed area"
                             else editCurrentPage { after }
                         },
-                        onErase = { points -> editCurrentPage { it.eraseAt(points, allowed, ranges) } }
+                        onErase = { points -> editCurrentPage { it.eraseAt(points, allowed, ranges) } },
+                        onWhitelist = { points -> whitelistCurrentPage(points) }
                     )
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(20.dp)) {
@@ -478,28 +518,50 @@ private fun RedactorScreen() {
                     }
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 RedactionToolButton("Redact", PaintTool.COVER, tool == PaintTool.COVER, !busy) {
                     tool = PaintTool.COVER
                 }
                 RedactionToolButton("Erase", PaintTool.ERASE, tool == PaintTool.ERASE, !busy) {
                     tool = PaintTool.ERASE
                 }
+                RedactionToolButton("Whitelist", PaintTool.WHITELIST, tool == PaintTool.WHITELIST, !busy) {
+                    tool = PaintTool.WHITELIST
+                    showMasks = true
+                    status = "Whitelist mode · tap or scribble across highlighted OCR words"
+                }
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = {
                     val undo = undoHistory.takeLastFor(pageIndex)
                     if (undo != null && !busy) {
-                        pages = pages.toMutableList().apply { this[pageIndex] = undo.first }
-                        reviewed = reviewed - pageIndex
+                        pages = pages.toMutableList().apply { this[pageIndex] = undo.first.page }
+                        val priorWhitelistText = undo.first.allowedTextBefore
+                        if (priorWhitelistText != null) {
+                            // Undo the whitelist mutation globally, then persist immediately.
+                            val oldId = undo.first.presetId
+                            val restored = presets.map { preset ->
+                                if (preset.id == oldId) preset.copy(allowedText = priorWhitelistText)
+                                else preset
+                            }
+                            persist(next = restored, invalidate = false)
+                            reviewed = emptySet()
+                            status = "Whitelist change undone · review pages again"
+                        } else {
+                            reviewed = reviewed - pageIndex
+                            status = "Undid last edit · review page again"
+                        }
                         undoHistory = undo.second
                         showMasks = true
-                        status = "Undid last edit · review page again"
                     }
                 }, enabled = undoHistory.canUndo(pageIndex) && !busy, contentPadding = PaddingValues(horizontal = 3.dp)) {
                     Text("Undo")
                 }
-                TextButton(onClick = { showMasks = !showMasks }, enabled = pages.isNotEmpty() && !busy,
-                    contentPadding = PaddingValues(horizontal = 4.dp)) { Text(if (showMasks) "Original" else "Masked") }
+                TextButton(onClick = { showMasks = !showMasks },
+                    enabled = pages.isNotEmpty() && !busy && tool != PaintTool.WHITELIST,
+                    contentPadding = PaddingValues(horizontal = 3.dp)) {
+                    Text(if (tool == PaintTool.WHITELIST) "Live"
+                         else if (showMasks) "Original" else "Masked", fontSize = 11.sp)
+                }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = { pageIndex--; showMasks = true }, enabled = pageIndex > 0 && !busy,
@@ -627,7 +689,7 @@ private fun RedactorScreen() {
                 var nextHistory = undoHistory
                 findings.groupBy { it.pageIndex }.forEach { (index, perPage) ->
                     val original = updated[index]
-                    nextHistory = nextHistory.record(index, original)
+                    nextHistory = nextHistory.record(index, EditSnapshot(original))
                     val added = perPage.map { result ->
                         val b = result.word.bounds
                         val margin = maxOf(6f, b.height() * 0.25f)
@@ -880,9 +942,9 @@ private fun RedactionToolButton(
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = Color(0xFF292D32), contentColor = Fore
         ),
-        contentPadding = PaddingValues(horizontal = 11.dp, vertical = 1.dp)
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 1.dp)
     ) {
-        Canvas(Modifier.size(17.dp)) {
+        Canvas(Modifier.size(15.dp)) {
             val w = size.width
             val h = size.height
             val ink = Fore
@@ -899,6 +961,16 @@ private fun RedactionToolButton(
                 drawPath(eraser, ink, style = Stroke(width = 1.9.dp.toPx()))
                 drawLine(ink, Offset(0.41f * w, 0.55f * h),
                     Offset(0.70f * w, 0.77f * h), strokeWidth = 1.9.dp.toPx())
+            } else if (mode == PaintTool.WHITELIST) {
+                // Outlined tag with a plus sign: add selected source word to the preset.
+                drawRoundRect(ink, topLeft = Offset(0.07f * w, 0.13f * h),
+                    size = Size(0.86f * w, 0.75f * h),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()),
+                    style = Stroke(width = 1.7.dp.toPx()))
+                drawLine(ink, Offset(0.50f * w, 0.30f * h),
+                    Offset(0.50f * w, 0.70f * h), strokeWidth = 1.8.dp.toPx())
+                drawLine(ink, Offset(0.31f * w, 0.50f * h),
+                    Offset(0.69f * w, 0.50f * h), strokeWidth = 1.8.dp.toPx())
             } else {
                 // A solid redaction bar, rather than the former pencil glyph.
                 drawRoundRect(ink, topLeft = Offset(0.08f * w, 0.43f * h),
@@ -908,8 +980,8 @@ private fun RedactionToolButton(
                     Offset(0.83f * w, 0.22f * h), strokeWidth = 1.5.dp.toPx())
             }
         }
-        Spacer(Modifier.width(6.dp))
-        Text(label, fontSize = 12.sp)
+        Spacer(Modifier.width(4.dp))
+        Text(label, fontSize = 11.sp, maxLines = 1)
     }
 }
 
@@ -934,13 +1006,15 @@ private fun RedactionPreview(
     tool: PaintTool,
     modifier: Modifier,
     onCover: (List<PointF>) -> Unit,
-    onErase: (List<PointF>) -> Unit
+    onErase: (List<PointF>) -> Unit,
+    onWhitelist: (List<PointF>) -> Unit
 ) {
     val bitmap = page.bitmap
     val image = remember(bitmap) { bitmap.asImageBitmap() }
     val boxes = remember(page, allowed, times) { page.allBoxes(allowed, times) }
     val currentCover by rememberUpdatedState(onCover)
     val currentErase by rememberUpdatedState(onErase)
+    val currentWhitelist by rememberUpdatedState(onWhitelist)
     // Key stroke feedback to the image, not PageData: erasing changes PageData
     // but should never interrupt the next gesture's visual trail.
     var stroke by remember(bitmap, tool) { mutableStateOf<List<Offset>>(emptyList()) }
@@ -974,7 +1048,11 @@ private fun RedactionPreview(
                     val v = viewport(size.width.toFloat(), size.height.toFloat(),
                         bitmap.width, bitmap.height)
                     val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
-                    if (tool == PaintTool.COVER) currentCover(source) else currentErase(source)
+                    when (tool) {
+                        PaintTool.COVER -> currentCover(source)
+                        PaintTool.ERASE -> currentErase(source)
+                        PaintTool.WHITELIST -> currentWhitelist(source)
+                    }
                     completedStrokes++
                 }
             }
@@ -989,11 +1067,21 @@ private fun RedactionPreview(
         for (box in boxes) {
             val p = Offset(v.left + box.left * v.scale, v.top + box.top * v.scale)
             val sz = Size(box.width() * v.scale, box.height() * v.scale)
-            if (masksVisible) drawRect(Color.Black, topLeft = p, size = sz)
+            if (tool == PaintTool.WHITELIST) {
+                // Preview only: the source text remains readable under an amber tint.
+                // SecureExporter still uses solid, irreversible masks on export.
+                drawRect(Color(0xFFFFCF68).copy(alpha = 0.30f), topLeft = p, size = sz)
+                drawRect(Color(0xFFEDAA32).copy(alpha = 0.95f), topLeft = p, size = sz,
+                    style = Stroke(1.4.dp.toPx()))
+            } else if (masksVisible) drawRect(Color.Black, topLeft = p, size = sz)
             else drawRect(Color(0xFFFF7474), topLeft = p, size = sz, style = Stroke(2.2f))
         }
         // Draw every live stroke, plus a brief 300ms confirmation after lifting.
-        val trail = if (tool == PaintTool.ERASE) Color(0xFF68B7FF) else Color(0xFFFFC773)
+        val trail = when (tool) {
+            PaintTool.ERASE -> Color(0xFF68B7FF)
+            PaintTool.WHITELIST -> Accent
+            PaintTool.COVER -> Color(0xFFFFC773)
+        }
         stroke.zipWithNext().forEach { (a, b) ->
             drawLine(trail.copy(alpha = 0.92f), a, b, strokeWidth = 5.dp.toPx())
         }

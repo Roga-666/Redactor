@@ -150,3 +150,26 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
 - The option is intended for known OCR false positives only. If the scan is
   correct, the saved document may visibly expose sensitive/unapproved text.
   Inspect the saved output before sharing. The app is experimental.
+
+## v0.8.0 — Visual Whitelist brush and supplied launcher icon
+
+- Uses the user-provided circular mint document artwork as a **512px
+  adaptive Android launcher icon** (transparent WebP foreground).
+- Adds **Whitelist** beside Redact and Erase. This mode shows the original
+  document with existing redactions as **translucent amber regions**, so text
+  is readable while selecting it. This temporary preview is never exported.
+- Tap or scribble over **currently redacted, OCR-recognized** words to append
+  the corresponding OCR text to the *active* preset. All selected terms are
+  saved immediately and reused when the preset is selected again.
+- Whitelist additions (and conservatively reversible manual masks) participate
+  in the existing five-step Undo. Undo restores the prior saved whitelist
+  and its original page state.
+- Changing a whitelist can change every page's visibility. Every page must
+  therefore be re-reviewed before the next export.
+- Unrecognized regions are not guessed. OCR errors may add the wrong text;
+  inspect the Allowed editor to confirm what was saved. Wide manual masks
+  are intentionally retained, to avoid exposing other unrecognized content.
+  Erase may remove those manually if appropriate.
+- Exports remain flattened and use the existing review/verification pipeline.
+  The optional OCR-warning export override remains off by default.
+- This remains experimental software, not a certified redaction tool.
