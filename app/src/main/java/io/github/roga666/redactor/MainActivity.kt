@@ -176,17 +176,15 @@ private fun RedactorScreen() {
             status = "No covered OCR word found · manually add undetected text in Allowed"
             return
         }
-        val toAdd = picked.words.filter { term -> Whitelist.normalize(term) !in allowed }
+        val edit = WhitelistEditor.add(active.allowedText, picked.words)
+        val toAdd = edit.added
         if (toAdd.isEmpty() && picked.updatedPage == before) {
             status = "OCR text already whitelisted · use Erase for remaining manual masks"
             return
         }
 
         undoHistory = undoHistory.record(pageIndex, EditSnapshot(before, active.id, active.allowedText))
-        val updatedAllowed = if (toAdd.isEmpty()) active.allowedText else {
-            active.allowedText.trimEnd() + (if (active.allowedText.isBlank()) "" else "\n") +
-                toAdd.joinToString("\n")
-        }
+        val updatedAllowed = edit.text
         // The whitelist belongs to the selected preset, so matching labels on
         // other pages also change. All existing reviews must be performed again.
         persist(
