@@ -535,11 +535,12 @@ private fun RedactorScreen() {
                     val undo = undoHistory.takeLastFor(pageIndex)
                     if (undo != null && !busy) {
                         pages = pages.toMutableList().apply { this[pageIndex] = undo.first.page }
-                        if (undo.first.allowedTextBefore != null) {
+                        val priorWhitelistText = undo.first.allowedTextBefore
+                        if (priorWhitelistText != null) {
                             // Undo the whitelist mutation globally, then persist immediately.
                             val oldId = undo.first.presetId
                             val restored = presets.map { preset ->
-                                if (preset.id == oldId) preset.copy(allowedText = undo.first.allowedTextBefore)
+                                if (preset.id == oldId) preset.copy(allowedText = priorWhitelistText)
                                 else preset
                             }
                             persist(next = restored, invalidate = false)
