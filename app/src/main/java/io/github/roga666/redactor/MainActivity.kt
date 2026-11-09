@@ -702,7 +702,7 @@ private fun RedactorScreen() {
                 validationFindings = emptyList()
                 status = "Added ${findings.size} covers · inspect affected pages"
             }) { Text("Cover found text") } },
-            dismissButton = { TextButton(onClick = { validationFindings = emptyList() }) { Text("Review myself") } }
+            dismissButton = { TextButton(onClick = { validationFindings = emptyList() }) { Text("Inspect manually") } }
         )
     }
 
