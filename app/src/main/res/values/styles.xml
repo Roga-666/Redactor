@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark from launch until Compose draws; avoids a white navigation-bar flash. -->
+    <style name="RedactorTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#101417</item>
+        <item name="android:statusBarColor">#101417</item>
+        <item name="android:navigationBarColor">#101417</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+    </style>
+</resources>

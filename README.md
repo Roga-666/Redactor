@@ -191,3 +191,16 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
   open, use **New file** in the page controls to replace it.
 - Removing required review makes it easier to accidentally share OCR misses;
   manually inspect sensitive documents and the exported file before sharing.
+
+## v0.9.1 — Dark Android navigation bar
+
+- Matches the navigation bar and gesture area to Redactor's dark background
+  (`#101417`), with light navigation icons/buttons.
+- Uses AndroidX edge-to-edge handling so modern Android devices draw the same
+  dark Compose surface behind transparent gesture navigation.
+- Disables the optional pale navigation-bar contrast scrim on Android 10+.
+- Adds a dark native launch/window theme so the navigation bar does not flash
+  white before Compose appears.
+- The change is visual only: OCR, presets, tools, and secure export are unchanged.
+- Actual appearance may vary slightly by phone manufacturer, system navigation
+  mode, and device-wide contrast/accessibility settings.
