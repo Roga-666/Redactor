@@ -208,7 +208,7 @@ private fun RedactorScreen() {
                 busy = true
                 status = "Scanning locally…"
                 pages = emptyList()
-                    undoHistory = UndoHistory()
+                undoHistory = UndoHistory()
                 pageIndex = 0
                 showMasks = true
                 try {
@@ -236,6 +236,16 @@ private fun RedactorScreen() {
                 } finally { busy = false }
             }
         }
+    }
+
+    fun launchFilePicker() {
+        if (busy) return
+        importLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "application/pdf"))
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+        })
     }
 
     fun showExportError(message: String) {
@@ -456,18 +466,6 @@ private fun RedactorScreen() {
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = { showSettings = true }, enabled = !busy,
                     contentPadding = PaddingValues(horizontal = 8.dp)) { Text("⚙", fontSize = 23.sp) }
-                Button(
-                    onClick = {
-                        importLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "*/*"
-                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "application/pdf"))
-                            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
-                        })
-                    },
-                    enabled = !busy,
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp)
-                ) { Text("+ Import") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = { showPresets = true }, enabled = !busy, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 9.dp)) {
@@ -488,7 +486,9 @@ private fun RedactorScreen() {
             }
 
             Box(
-                modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(12.dp)).background(Color(0xFF242D31)),
+                modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF242D31))
+                    .clickable(enabled = pages.isEmpty() && !busy, onClick = ::launchFilePicker),
                 contentAlignment = Alignment.Center
             ) {
                 if (pages.isNotEmpty()) {
@@ -506,10 +506,14 @@ private fun RedactorScreen() {
                         onWhitelist = { points -> whitelistCurrentPage(points) }
                     )
                 } else {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(20.dp)) {
-                        Text("▧", fontSize = 48.sp, color = Accent)
-                        Text("Your preview appears here", fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                        Text("Images and PDFs stay on this device", color = Muted, fontSize = 12.sp)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(20.dp)
+                    ) {
+                        Text("＋", fontSize = 54.sp, color = Accent)
+                        Text("Tap anywhere to import", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Images and PDFs • processed offline", color = Muted, fontSize = 12.sp)
                     }
                 }
             }
@@ -563,6 +567,8 @@ private fun RedactorScreen() {
                     modifier = Modifier.weight(1f), fontSize = 13.sp, color = Muted, maxLines = 1)
                 OutlinedButton(onClick = { pageIndex++; showMasks = true }, enabled = pageIndex < pages.lastIndex && !busy,
                     contentPadding = PaddingValues(horizontal = 12.dp)) { Text("›") }
+                TextButton(onClick = ::launchFilePicker, enabled = !busy && pages.isNotEmpty(),
+                    contentPadding = PaddingValues(horizontal = 8.dp)) { Text("New file", fontSize = 12.sp) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = { requestExport(true) },
