@@ -1041,6 +1041,7 @@ private fun RedactionPreview(
                     var points = listOf(down.position)
                     var transformed = false
                     stroke = points
+                    var fingersStillPressed: Boolean
                     do {
                         val event = awaitPointerEvent()
                         val activeFingers = event.changes.count { it.pressed }
@@ -1086,7 +1087,8 @@ private fun RedactionPreview(
                                 change.consume()
                             }
                         }
-                    } while (event.changes.any { it.pressed })
+                        fingersStillPressed = event.changes.any { it.pressed }
+                    } while (fingersStillPressed)
 
                     if (!transformed) {
                         val v = viewport(
