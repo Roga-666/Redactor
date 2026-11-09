@@ -105,7 +105,6 @@ private fun RedactorScreen() {
 
     var pages by remember { mutableStateOf<List<PageData>>(emptyList()) }
     var pageIndex by remember { mutableIntStateOf(0) }
-    var reviewed by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var undoHistory by remember { mutableStateOf(UndoHistory<EditSnapshot>()) }
     var tool by remember { mutableStateOf(PaintTool.COVER) }
     var showMasks by remember { mutableStateOf(true) }
@@ -120,7 +119,7 @@ private fun RedactorScreen() {
     var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
     var allowScreenshots by remember { mutableStateOf(appSettings.getBoolean("allow_screenshots", false)) }
     // Opt-in only: still run the second OCR scan, but don't let warnings block the
-    // already-flattened export. The page-by-page review requirement is unchanged.
+    // already-flattened export. Manual review is encouraged, not a required button.
     var allowExportWithOcrWarnings by remember {
         mutableStateOf(appSettings.getBoolean("allow_export_with_ocr_warnings", false))
     }
@@ -145,7 +144,6 @@ private fun RedactorScreen() {
         selectedId = id
         store.save(next, id)
         if (invalidate) {
-            reviewed = emptySet()
             undoHistory = UndoHistory()
             pages = pages.map { it.copy(revealedWordIndices = emptySet()) }
         }
@@ -162,9 +160,8 @@ private fun RedactorScreen() {
         if (before == after) return
         undoHistory = undoHistory.record(pageIndex, EditSnapshot(before))
         pages = pages.toMutableList().apply { this[pageIndex] = after }
-        reviewed = reviewed - pageIndex
         showMasks = true
-        status = "Change saved · review this page again"
+        status = "Change saved · inspect the updated page"
     }
 
 
@@ -186,13 +183,12 @@ private fun RedactorScreen() {
         undoHistory = undoHistory.record(pageIndex, EditSnapshot(before, active.id, active.allowedText))
         val updatedAllowed = edit.text
         // The whitelist belongs to the selected preset, so matching labels on
-        // other pages also change. All existing reviews must be performed again.
+        // other pages also change. Changes can affect all pages.
         persist(
             next = presets.map { if (it.id == active.id) it.copy(allowedText = updatedAllowed) else it },
             invalidate = false
         )
         pages = pages.toMutableList().apply { this[pageIndex] = picked.updatedPage }
-        reviewed = emptySet()
         status = when {
             toAdd.size == 1 -> "Added to " + active.name + ": " + toAdd.first().take(45)
             toAdd.size > 1 -> "Added " + toAdd.size + " items to " + active.name
@@ -204,7 +200,7 @@ private fun RedactorScreen() {
         Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
     }
 
-    val ready = pages.isNotEmpty() && reviewed.size == pages.size && !busy
+    val ready = pages.isNotEmpty() && !busy
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
         if (uri != null) {
@@ -212,8 +208,7 @@ private fun RedactorScreen() {
                 busy = true
                 status = "Scanning locally…"
                 pages = emptyList()
-                reviewed = emptySet()
-                undoHistory = UndoHistory()
+                    undoHistory = UndoHistory()
                 pageIndex = 0
                 showMasks = true
                 try {
@@ -363,7 +358,7 @@ private fun RedactorScreen() {
     }
 
     fun requestExport(pdf: Boolean) {
-        if (!ready) { status = "Review every page before export"; return }
+        if (!ready) { status = "Import a document before exporting"; return }
         val pageIndices = if (pdf) pages.indices.toList() else listOf(pageIndex)
         val originals = pageIndices.map { pages[it] }
         val termSnapshot = allowed.toSet()
@@ -544,11 +539,9 @@ private fun RedactorScreen() {
                                 else preset
                             }
                             persist(next = restored, invalidate = false)
-                            reviewed = emptySet()
-                            status = "Whitelist change undone · review pages again"
+                                            status = "Whitelist undone · inspect affected pages"
                         } else {
-                            reviewed = reviewed - pageIndex
-                            status = "Undid last edit · review page again"
+                                                status = "Undid last edit · inspect updated page"
                         }
                         undoHistory = undo.second
                         showMasks = true
@@ -570,12 +563,6 @@ private fun RedactorScreen() {
                     modifier = Modifier.weight(1f), fontSize = 13.sp, color = Muted, maxLines = 1)
                 OutlinedButton(onClick = { pageIndex++; showMasks = true }, enabled = pageIndex < pages.lastIndex && !busy,
                     contentPadding = PaddingValues(horizontal = 12.dp)) { Text("›") }
-                Button(
-                    onClick = { reviewed = if (pageIndex in reviewed) reviewed - pageIndex else reviewed + pageIndex },
-                    enabled = pages.isNotEmpty() && !busy,
-                    colors = ButtonDefaults.buttonColors(containerColor = if (pageIndex in reviewed) Color(0xFF315B4F) else Accent),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) { Text(if (pageIndex in reviewed) "Reviewed" else "Review") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = { requestExport(true) },
@@ -681,7 +668,7 @@ private fun RedactorScreen() {
                     findings.forEach { item ->
                         Text("Page ${item.pageIndex + 1}: ‘${item.word.content}’", fontSize = 13.sp)
                     }
-                    Text("Cover all highlighted regions, review affected pages again, then export. You can also dismiss and cover them manually.", color = Muted, fontSize = 12.sp)
+                    Text("Cover all highlighted regions, inspect affected pages, then export. You can also dismiss and cover them manually.", color = Muted, fontSize = 12.sp)
                 }
             },
             confirmButton = { TextButton(onClick = {
@@ -700,12 +687,11 @@ private fun RedactorScreen() {
                     updated[index] = original.copy(manualBoxes = original.manualBoxes + added)
                 }
                 pages = updated
-                reviewed = reviewed - findings.map { it.pageIndex }.toSet()
                 pageIndex = findings.first().pageIndex
                 undoHistory = nextHistory
                 showMasks = true
                 validationFindings = emptyList()
-                status = "Added ${findings.size} covers · review affected pages again"
+                status = "Added ${findings.size} covers · inspect affected pages"
             }) { Text("Cover found text") } },
             dismissButton = { TextButton(onClick = { validationFindings = emptyList() }) { Text("Review myself") } }
         )
