@@ -21,6 +21,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -984,9 +987,16 @@ private data class Viewport(val scale: Float, val left: Float, val top: Float) {
     )
 }
 
-private fun viewport(viewW: Float, viewH: Float, bitmapW: Int, bitmapH: Int): Viewport {
-    val scale = min(viewW / bitmapW, viewH / bitmapH)
-    return Viewport(scale, (viewW - bitmapW * scale) / 2f, (viewH - bitmapH * scale) / 2f)
+private fun viewport(
+    viewW: Float, viewH: Float, bitmapW: Int, bitmapH: Int,
+    zoom: Float = 1f, pan: Offset = Offset.Zero
+): Viewport {
+    val scale = min(viewW / bitmapW, viewH / bitmapH) * zoom
+    return Viewport(
+        scale,
+        (viewW - bitmapW * scale) / 2f + pan.x,
+        (viewH - bitmapH * scale) / 2f + pan.y
+    )
 }
 
 @Composable
@@ -1007,6 +1017,9 @@ private fun RedactionPreview(
     val currentCover by rememberUpdatedState(onCover)
     val currentErase by rememberUpdatedState(onErase)
     val currentWhitelist by rememberUpdatedState(onWhitelist)
+    // Zoom/pan are preview-only and reset when a new image/page is displayed.
+    var zoom by remember(bitmap) { mutableFloatStateOf(1f) }
+    var pan by remember(bitmap) { mutableStateOf(Offset.Zero) }
     // Key stroke feedback to the image, not PageData: erasing changes PageData
     // but should never interrupt the next gesture's visual trail.
     var stroke by remember(bitmap, tool) { mutableStateOf<List<Offset>>(emptyList()) }
@@ -1021,35 +1034,79 @@ private fun RedactionPreview(
     Canvas(
         modifier = modifier.clip(RoundedCornerShape(12.dp))
             .pointerInput(tool, bitmap) {
-                // One gesture recognizer handles both taps and scribbles. Separate
-                // detectors previously competed for touches on fast successive edits.
+                // One finger edits the document. Two fingers zoom and pan the
+                // preview; those gestures never add/erase/whitelist any words.
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     var points = listOf(down.position)
+                    var transformed = false
                     stroke = points
-                    while (true) {
+                    do {
                         val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.position != points.last()) {
-                            points = points + change.position
-                            stroke = points
+                        val activeFingers = event.changes.count { it.pressed }
+                        if (activeFingers >= 2) {
+                            transformed = true
+                            stroke = emptyList()
+                            val previousZoom = zoom
+                            val nextZoom = ZoomPanMath.nextZoom(
+                                previousZoom, event.calculateZoom()
+                            )
+                            val centroid = event.calculateCentroid(useCurrent = false)
+                            val motion = event.calculatePan()
+                            val fittingScale = min(
+                                size.width.toFloat() / bitmap.width,
+                                size.height.toFloat() / bitmap.height
+                            )
+                            val ratio = nextZoom / previousZoom
+                            pan = Offset(
+                                ZoomPanMath.limitPan(
+                                    ZoomPanMath.anchoredPan(
+                                        pan.x, centroid.x, size.width.toFloat(),
+                                        motion.x, ratio
+                                    ),
+                                    size.width.toFloat(), bitmap.width * fittingScale, nextZoom
+                                ),
+                                ZoomPanMath.limitPan(
+                                    ZoomPanMath.anchoredPan(
+                                        pan.y, centroid.y, size.height.toFloat(),
+                                        motion.y, ratio
+                                    ),
+                                    size.height.toFloat(), bitmap.height * fittingScale, nextZoom
+                                )
+                            )
+                            zoom = nextZoom
+                            event.changes.forEach { if (it.pressed) it.consume() }
+                        } else if (!transformed) {
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change != null) {
+                                if (change.position != points.last()) {
+                                    points = points + change.position
+                                    stroke = points
+                                }
+                                change.consume()
+                            }
                         }
-                        if (!change.pressed) break
-                        change.consume()
+                    } while (event.changes.any { it.pressed })
+
+                    if (!transformed) {
+                        val v = viewport(
+                            size.width.toFloat(), size.height.toFloat(),
+                            bitmap.width, bitmap.height, zoom, pan
+                        )
+                        val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
+                        when (tool) {
+                            PaintTool.COVER -> currentCover(source)
+                            PaintTool.ERASE -> currentErase(source)
+                            PaintTool.WHITELIST -> currentWhitelist(source)
+                        }
+                        completedStrokes++
+                    } else {
+                        stroke = emptyList()
                     }
-                    val v = viewport(size.width.toFloat(), size.height.toFloat(),
-                        bitmap.width, bitmap.height)
-                    val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
-                    when (tool) {
-                        PaintTool.COVER -> currentCover(source)
-                        PaintTool.ERASE -> currentErase(source)
-                        PaintTool.WHITELIST -> currentWhitelist(source)
-                    }
-                    completedStrokes++
                 }
             }
     ) {
-        val v = viewport(size.width, size.height, bitmap.width, bitmap.height)
+        val v = viewport(size.width, size.height, bitmap.width, bitmap.height, zoom, pan)
         drawImage(
             image = image,
             dstOffset = IntOffset(v.left.roundToInt(), v.top.roundToInt()),
