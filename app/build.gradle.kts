@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.roga666.redactor"
         minSdk = 28
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.9.1"
+        versionCode = System.getenv("APP_STORE_BUILD_NUMBER")?.toIntOrNull()?.let { 100000 + it } ?: 10
+        versionName = System.getenv("APP_STORE_BUILD_NUMBER")?.let { "0.9.1+ci.$it" } ?: "0.9.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
