@@ -1,6 +1,7 @@
 package io.github.roga666.redactor
 
 import android.app.Activity
+import android.graphics.Color as AndroidColor
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -12,6 +13,8 @@ import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -74,7 +77,20 @@ private data class PreparedExport(val pages: List<Bitmap>, val pdf: Boolean, val
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Android 15+ draws behind system bars. Use a dark, full-window surface
+        // rather than inheriting the device's default light navigation bar.
+        // SystemBarStyle.dark keeps gesture and 3-button navigation icons light.
+        val barColor = AndroidColor.rgb(0x10, 0x14, 0x17)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(barColor),
+            navigationBarStyle = SystemBarStyle.dark(barColor)
+        )
         super.onCreate(savedInstanceState)
+        // Avoid Android's automatic pale contrast overlay in three-button mode.
+        // Compose's dark root Surface extends under transparent system bars.
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         // Keep sensitive pages protected unless the user explicitly opts into screenshots.
         val screenshotPreference = getSharedPreferences("redactor_settings", Context.MODE_PRIVATE)
         if (!screenshotPreference.getBoolean("allow_screenshots", false)) {
