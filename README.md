@@ -173,3 +173,21 @@ Profiles and whitelist rules are saved in private app preferences. No network pe
 - Exports remain flattened and use the existing review/verification pipeline.
   The optional OCR-warning export override remains off by default.
 - This remains experimental software, not a certified redaction tool.
+
+## v0.9.0 — Zoom, instant export, and import from empty preview
+
+- Launcher icon artwork is slightly zoomed out (5dp inset on each side).
+  The uploaded icon image itself remains unchanged.
+- The manual **Review / Reviewed** button is removed. PNG/PDF buttons are
+  available once a document is imported, with no acknowledgement step.
+- The final OCR verification still runs. Its existing optional **Allow export
+  with OCR warnings** setting continues to control whether unexpected text
+  blocks export. The new exports are still flattened and generated locally.
+- Pinch the document with **two fingers** to zoom between 1× and 6×.
+  Move **two fingers** together to pan horizontally or vertically at zoom.
+  Single-finger taps/scribbles remain tied to the selected Redact, Erase,
+  or Whitelist tool. Multi-touch gestures cannot select or change masks.
+- The full blank preview is now a tap-to-import target; once a document is
+  open, use **New file** in the page controls to replace it.
+- Removing required review makes it easier to accidentally share OCR misses;
+  manually inspect sensitive documents and the exported file before sharing.
