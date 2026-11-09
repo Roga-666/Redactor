@@ -21,6 +21,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -105,7 +108,6 @@ private fun RedactorScreen() {
 
     var pages by remember { mutableStateOf<List<PageData>>(emptyList()) }
     var pageIndex by remember { mutableIntStateOf(0) }
-    var reviewed by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var undoHistory by remember { mutableStateOf(UndoHistory<EditSnapshot>()) }
     var tool by remember { mutableStateOf(PaintTool.COVER) }
     var showMasks by remember { mutableStateOf(true) }
@@ -120,7 +122,7 @@ private fun RedactorScreen() {
     var exportFolder by remember { mutableStateOf(appSettings.getString("export_folder_uri", null)) }
     var allowScreenshots by remember { mutableStateOf(appSettings.getBoolean("allow_screenshots", false)) }
     // Opt-in only: still run the second OCR scan, but don't let warnings block the
-    // already-flattened export. The page-by-page review requirement is unchanged.
+    // already-flattened export. Manual review is encouraged, not a required button.
     var allowExportWithOcrWarnings by remember {
         mutableStateOf(appSettings.getBoolean("allow_export_with_ocr_warnings", false))
     }
@@ -145,7 +147,6 @@ private fun RedactorScreen() {
         selectedId = id
         store.save(next, id)
         if (invalidate) {
-            reviewed = emptySet()
             undoHistory = UndoHistory()
             pages = pages.map { it.copy(revealedWordIndices = emptySet()) }
         }
@@ -162,9 +163,8 @@ private fun RedactorScreen() {
         if (before == after) return
         undoHistory = undoHistory.record(pageIndex, EditSnapshot(before))
         pages = pages.toMutableList().apply { this[pageIndex] = after }
-        reviewed = reviewed - pageIndex
         showMasks = true
-        status = "Change saved · review this page again"
+        status = "Change saved · inspect the updated page"
     }
 
 
@@ -186,13 +186,12 @@ private fun RedactorScreen() {
         undoHistory = undoHistory.record(pageIndex, EditSnapshot(before, active.id, active.allowedText))
         val updatedAllowed = edit.text
         // The whitelist belongs to the selected preset, so matching labels on
-        // other pages also change. All existing reviews must be performed again.
+        // other pages also change. Changes can affect all pages.
         persist(
             next = presets.map { if (it.id == active.id) it.copy(allowedText = updatedAllowed) else it },
             invalidate = false
         )
         pages = pages.toMutableList().apply { this[pageIndex] = picked.updatedPage }
-        reviewed = emptySet()
         status = when {
             toAdd.size == 1 -> "Added to " + active.name + ": " + toAdd.first().take(45)
             toAdd.size > 1 -> "Added " + toAdd.size + " items to " + active.name
@@ -204,7 +203,7 @@ private fun RedactorScreen() {
         Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
     }
 
-    val ready = pages.isNotEmpty() && reviewed.size == pages.size && !busy
+    val ready = pages.isNotEmpty() && !busy
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
         if (uri != null) {
@@ -212,7 +211,6 @@ private fun RedactorScreen() {
                 busy = true
                 status = "Scanning locally…"
                 pages = emptyList()
-                reviewed = emptySet()
                 undoHistory = UndoHistory()
                 pageIndex = 0
                 showMasks = true
@@ -241,6 +239,16 @@ private fun RedactorScreen() {
                 } finally { busy = false }
             }
         }
+    }
+
+    fun launchFilePicker() {
+        if (busy) return
+        importLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "application/pdf"))
+            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
+        })
     }
 
     fun showExportError(message: String) {
@@ -363,7 +371,7 @@ private fun RedactorScreen() {
     }
 
     fun requestExport(pdf: Boolean) {
-        if (!ready) { status = "Review every page before export"; return }
+        if (!ready) { status = "Import a document before exporting"; return }
         val pageIndices = if (pdf) pages.indices.toList() else listOf(pageIndex)
         val originals = pageIndices.map { pages[it] }
         val termSnapshot = allowed.toSet()
@@ -461,18 +469,6 @@ private fun RedactorScreen() {
                 Spacer(Modifier.weight(1f))
                 TextButton(onClick = { showSettings = true }, enabled = !busy,
                     contentPadding = PaddingValues(horizontal = 8.dp)) { Text("⚙", fontSize = 23.sp) }
-                Button(
-                    onClick = {
-                        importLauncher.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                            addCategory(Intent.CATEGORY_OPENABLE)
-                            type = "*/*"
-                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "application/pdf"))
-                            putExtra(Intent.EXTRA_LOCAL_ONLY, true)
-                        })
-                    },
-                    enabled = !busy,
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp)
-                ) { Text("+ Import") }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedButton(onClick = { showPresets = true }, enabled = !busy, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 9.dp)) {
@@ -493,7 +489,9 @@ private fun RedactorScreen() {
             }
 
             Box(
-                modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(12.dp)).background(Color(0xFF242D31)),
+                modifier = Modifier.fillMaxWidth().weight(1f).clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF242D31))
+                    .clickable(enabled = pages.isEmpty() && !busy, onClick = ::launchFilePicker),
                 contentAlignment = Alignment.Center
             ) {
                 if (pages.isNotEmpty()) {
@@ -511,10 +509,14 @@ private fun RedactorScreen() {
                         onWhitelist = { points -> whitelistCurrentPage(points) }
                     )
                 } else {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(20.dp)) {
-                        Text("▧", fontSize = 48.sp, color = Accent)
-                        Text("Your preview appears here", fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                        Text("Images and PDFs stay on this device", color = Muted, fontSize = 12.sp)
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.padding(20.dp)
+                    ) {
+                        Text("＋", fontSize = 54.sp, color = Accent)
+                        Text("Tap anywhere to import", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Images and PDFs • processed offline", color = Muted, fontSize = 12.sp)
                     }
                 }
             }
@@ -544,11 +546,9 @@ private fun RedactorScreen() {
                                 else preset
                             }
                             persist(next = restored, invalidate = false)
-                            reviewed = emptySet()
-                            status = "Whitelist change undone · review pages again"
+                                            status = "Whitelist undone · inspect affected pages"
                         } else {
-                            reviewed = reviewed - pageIndex
-                            status = "Undid last edit · review page again"
+                                                status = "Undid last edit · inspect updated page"
                         }
                         undoHistory = undo.second
                         showMasks = true
@@ -570,12 +570,8 @@ private fun RedactorScreen() {
                     modifier = Modifier.weight(1f), fontSize = 13.sp, color = Muted, maxLines = 1)
                 OutlinedButton(onClick = { pageIndex++; showMasks = true }, enabled = pageIndex < pages.lastIndex && !busy,
                     contentPadding = PaddingValues(horizontal = 12.dp)) { Text("›") }
-                Button(
-                    onClick = { reviewed = if (pageIndex in reviewed) reviewed - pageIndex else reviewed + pageIndex },
-                    enabled = pages.isNotEmpty() && !busy,
-                    colors = ButtonDefaults.buttonColors(containerColor = if (pageIndex in reviewed) Color(0xFF315B4F) else Accent),
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) { Text(if (pageIndex in reviewed) "Reviewed" else "Review") }
+                TextButton(onClick = ::launchFilePicker, enabled = !busy && pages.isNotEmpty(),
+                    contentPadding = PaddingValues(horizontal = 8.dp)) { Text("New file", fontSize = 12.sp) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = { requestExport(true) },
@@ -681,7 +677,7 @@ private fun RedactorScreen() {
                     findings.forEach { item ->
                         Text("Page ${item.pageIndex + 1}: ‘${item.word.content}’", fontSize = 13.sp)
                     }
-                    Text("Cover all highlighted regions, review affected pages again, then export. You can also dismiss and cover them manually.", color = Muted, fontSize = 12.sp)
+                    Text("Cover all highlighted regions, inspect affected pages, then export. You can also dismiss and cover them manually.", color = Muted, fontSize = 12.sp)
                 }
             },
             confirmButton = { TextButton(onClick = {
@@ -700,14 +696,13 @@ private fun RedactorScreen() {
                     updated[index] = original.copy(manualBoxes = original.manualBoxes + added)
                 }
                 pages = updated
-                reviewed = reviewed - findings.map { it.pageIndex }.toSet()
                 pageIndex = findings.first().pageIndex
                 undoHistory = nextHistory
                 showMasks = true
                 validationFindings = emptyList()
-                status = "Added ${findings.size} covers · review affected pages again"
+                status = "Added ${findings.size} covers · inspect affected pages"
             }) { Text("Cover found text") } },
-            dismissButton = { TextButton(onClick = { validationFindings = emptyList() }) { Text("Review myself") } }
+            dismissButton = { TextButton(onClick = { validationFindings = emptyList() }) { Text("Inspect manually") } }
         )
     }
 
@@ -992,9 +987,16 @@ private data class Viewport(val scale: Float, val left: Float, val top: Float) {
     )
 }
 
-private fun viewport(viewW: Float, viewH: Float, bitmapW: Int, bitmapH: Int): Viewport {
-    val scale = min(viewW / bitmapW, viewH / bitmapH)
-    return Viewport(scale, (viewW - bitmapW * scale) / 2f, (viewH - bitmapH * scale) / 2f)
+private fun viewport(
+    viewW: Float, viewH: Float, bitmapW: Int, bitmapH: Int,
+    zoom: Float = 1f, pan: Offset = Offset.Zero
+): Viewport {
+    val scale = min(viewW / bitmapW, viewH / bitmapH) * zoom
+    return Viewport(
+        scale,
+        (viewW - bitmapW * scale) / 2f + pan.x,
+        (viewH - bitmapH * scale) / 2f + pan.y
+    )
 }
 
 @Composable
@@ -1015,6 +1017,9 @@ private fun RedactionPreview(
     val currentCover by rememberUpdatedState(onCover)
     val currentErase by rememberUpdatedState(onErase)
     val currentWhitelist by rememberUpdatedState(onWhitelist)
+    // Zoom/pan are preview-only and reset when a new image/page is displayed.
+    var zoom by remember(bitmap) { mutableFloatStateOf(1f) }
+    var pan by remember(bitmap) { mutableStateOf(Offset.Zero) }
     // Key stroke feedback to the image, not PageData: erasing changes PageData
     // but should never interrupt the next gesture's visual trail.
     var stroke by remember(bitmap, tool) { mutableStateOf<List<Offset>>(emptyList()) }
@@ -1029,35 +1034,81 @@ private fun RedactionPreview(
     Canvas(
         modifier = modifier.clip(RoundedCornerShape(12.dp))
             .pointerInput(tool, bitmap) {
-                // One gesture recognizer handles both taps and scribbles. Separate
-                // detectors previously competed for touches on fast successive edits.
+                // One finger edits the document. Two fingers zoom and pan the
+                // preview; those gestures never add/erase/whitelist any words.
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     var points = listOf(down.position)
+                    var transformed = false
                     stroke = points
-                    while (true) {
+                    var fingersStillPressed: Boolean
+                    do {
                         val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                        if (change.position != points.last()) {
-                            points = points + change.position
-                            stroke = points
+                        val activeFingers = event.changes.count { it.pressed }
+                        if (activeFingers >= 2) {
+                            transformed = true
+                            stroke = emptyList()
+                            val previousZoom = zoom
+                            val nextZoom = ZoomPanMath.nextZoom(
+                                previousZoom, event.calculateZoom()
+                            )
+                            val centroid = event.calculateCentroid(useCurrent = false)
+                            val motion = event.calculatePan()
+                            val fittingScale = min(
+                                size.width.toFloat() / bitmap.width,
+                                size.height.toFloat() / bitmap.height
+                            )
+                            val ratio = nextZoom / previousZoom
+                            pan = Offset(
+                                ZoomPanMath.limitPan(
+                                    ZoomPanMath.anchoredPan(
+                                        pan.x, centroid.x, size.width.toFloat(),
+                                        motion.x, ratio
+                                    ),
+                                    size.width.toFloat(), bitmap.width * fittingScale, nextZoom
+                                ),
+                                ZoomPanMath.limitPan(
+                                    ZoomPanMath.anchoredPan(
+                                        pan.y, centroid.y, size.height.toFloat(),
+                                        motion.y, ratio
+                                    ),
+                                    size.height.toFloat(), bitmap.height * fittingScale, nextZoom
+                                )
+                            )
+                            zoom = nextZoom
+                            event.changes.forEach { if (it.pressed) it.consume() }
+                        } else if (!transformed) {
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                            if (change != null) {
+                                if (change.position != points.last()) {
+                                    points = points + change.position
+                                    stroke = points
+                                }
+                                change.consume()
+                            }
                         }
-                        if (!change.pressed) break
-                        change.consume()
+                        fingersStillPressed = event.changes.any { it.pressed }
+                    } while (fingersStillPressed)
+
+                    if (!transformed) {
+                        val v = viewport(
+                            size.width.toFloat(), size.height.toFloat(),
+                            bitmap.width, bitmap.height, zoom, pan
+                        )
+                        val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
+                        when (tool) {
+                            PaintTool.COVER -> currentCover(source)
+                            PaintTool.ERASE -> currentErase(source)
+                            PaintTool.WHITELIST -> currentWhitelist(source)
+                        }
+                        completedStrokes++
+                    } else {
+                        stroke = emptyList()
                     }
-                    val v = viewport(size.width.toFloat(), size.height.toFloat(),
-                        bitmap.width, bitmap.height)
-                    val source = points.map { v.toSource(it, bitmap.width, bitmap.height) }
-                    when (tool) {
-                        PaintTool.COVER -> currentCover(source)
-                        PaintTool.ERASE -> currentErase(source)
-                        PaintTool.WHITELIST -> currentWhitelist(source)
-                    }
-                    completedStrokes++
                 }
             }
     ) {
-        val v = viewport(size.width, size.height, bitmap.width, bitmap.height)
+        val v = viewport(size.width, size.height, bitmap.width, bitmap.height, zoom, pan)
         drawImage(
             image = image,
             dstOffset = IntOffset(v.left.roundToInt(), v.top.roundToInt()),
