@@ -1,0 +1,64 @@
+name: Publish signed Droid-ify APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: droidify-signed-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      APP_STORE_BUILD_NUMBER: ${{ github.run_number }}
+      ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+      ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+      ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+      ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check signing secrets
+        id: ready
+        shell: bash
+        run: |
+          if [ -z "$ANDROID_RELEASE_KEYSTORE_BASE64" ] || [ -z "$ANDROID_RELEASE_STORE_PASSWORD" ] || [ -z "$ANDROID_RELEASE_KEY_ALIAS" ] || [ -z "$ANDROID_RELEASE_KEY_PASSWORD" ]; then
+            echo "::notice::Signed release skipped; configure four repo signing secrets."
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v4
+        if: steps.ready.outputs.enabled == 'true'
+      - uses: actions/setup-java@v4
+        if: steps.ready.outputs.enabled == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.ready.outputs.enabled == 'true'
+        with:
+          gradle-version: '8.11.1'
+      - name: Install SDK
+        if: steps.ready.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          sdkmanager="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -1)"
+          test -n "$sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null || true
+          "$sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build unsigned release
+        if: steps.ready.outputs.enabled == 'true'
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Sign verify and publish
+        if: steps.ready.outputs.enabled == 'true'
+        shell: bash
+        env:
+          APK_INPUT: 'app/build/outputs/apk/release/app-release-unsigned.apk'
+          APP_NAME: 'Redactor'
+          EXPECTED_PACKAGE: 'io.github.roga666.redactor'
+          DENY_NETWORK: 'true'
+        run: bash .github/scripts/publish-signed-apk.sh
