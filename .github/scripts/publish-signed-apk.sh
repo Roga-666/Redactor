@@ -14,7 +14,12 @@ printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
 apk="$RUNNER_TEMP/$APP_NAME-droidify-$GITHUB_RUN_NUMBER.apk"
 "$tools_dir/apksigner" sign --ks "$keystore" --ks-key-alias "$ANDROID_RELEASE_KEY_ALIAS" --ks-pass env:ANDROID_RELEASE_STORE_PASSWORD --key-pass env:ANDROID_RELEASE_KEY_PASSWORD --out "$apk" "$RUNNER_TEMP/aligned.apk"
 rm -f "$keystore"
-certificate="$("$tools_dir/apksigner" verify --verbose --print-certs "$apk" | awk '/Signer #1 certificate SHA-256 digest:/ {print $NF; exit}')"
+# Accept verified V2/V3 and legacy signer output, but reject multiple signing IDs.
+certificates="$("$tools_dir/apksigner" verify --verbose --print-certs "$apk" | awk '/certificate SHA-256 digest:/ {print tolower($NF)}' | sort -u)"
+if ! [[ "$certificates" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "::error::Expected exactly one verified signing certificate SHA-256 digest"; exit 1
+fi
+certificate="$certificates"
 badging="$("$tools_dir/aapt" dump badging "$apk")"
 package_line="$(printf '%s\n' "$badging" | grep '^package: ' | head -n 1)"
 package="$(printf '%s\n' "$package_line" | grep -oP "name='\\K[^']+")"
