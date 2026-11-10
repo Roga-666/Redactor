@@ -25,6 +25,7 @@ package_line="$(printf '%s\n' "$badging" | grep '^package: ' | head -n 1)"
 package="$(printf '%s\n' "$package_line" | grep -oP "name='\\K[^']+")"
 code="$(printf '%s\n' "$package_line" | grep -oP "versionCode='\\K[0-9]+")"
 version="$(printf '%s\n' "$package_line" | grep -oP "versionName='\\K[^']*")"
+printf '::notice::Verified APK metadata: package=%s expected=%s versionCode=%s signerDigestLength=%s\\n' "$package" "$EXPECTED_PACKAGE" "$code" "${#certificate}"
 test -n "$certificate" && test -n "$code" && test "$package" = "$EXPECTED_PACKAGE" || { echo "::error::Invalid package ID, version, or signer"; exit 1; }
 if [ "$DENY_NETWORK" = "true" ] && "$tools_dir/aapt" dump permissions "$apk" | grep -E 'android.permission.(INTERNET|ACCESS_NETWORK_STATE)'; then
   echo "::error::Unexpected network permission in offline-only app"; exit 1
