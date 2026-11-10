@@ -22,7 +22,7 @@ fi
 certificate="$certificates"
 badging="$("$tools_dir/aapt" dump badging "$apk")"
 package_line="$(printf '%s\n' "$badging" | grep '^package: ' | head -n 1)"
-package="$(printf '%s\n' "$package_line" | grep -oP "name='\\K[^']+")"
+package="$(printf '%s\n' "$package_line" | grep -oP "^package: name='\\K[^']+")"
 code="$(printf '%s\n' "$package_line" | grep -oP "versionCode='\\K[0-9]+")"
 version="$(printf '%s\n' "$package_line" | grep -oP "versionName='\\K[^']*")"
 printf '::notice::Verified APK metadata: package=%s expected=%s versionCode=%s signerDigestLength=%s\\n' "$package" "$EXPECTED_PACKAGE" "$code" "${#certificate}"
